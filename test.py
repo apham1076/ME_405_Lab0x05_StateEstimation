@@ -12,89 +12,189 @@
 
 
 from serial import Serial, SerialException
-from time import sleep
+from time import sleep, time
 import matplotlib.pyplot as plt
 import msvcrt
 import pandas as pd
-import numpy as np
-import os
-
-key = ''                    # Stores value of key pressed as a string
-running = False             # Set when motor testing is progress
-streaming = False           # Set when data streaming is in progress
-runs = {}                   # Dict to contain runs
-run_count = 0               # Number of runs
-override = False            # Set if user wants to overwrite existing run
-_continue = False           # Second option, if user doesn't want to overwrite
-question = False           # Set when option to override is presented
-control_mode = True         # True for effort mode, False for velocity mode
-current_setpoint = 0       # Current velocity setpoint in ticks/second
-first = True
-done = False
-mode = 1                    # 1, 2, 3 = straight, pivot, arc
-
-user_prompt = '''\r\nCommand keys:
-    e      : Toggle between Effort mode and Velocity mode
-    0-9,a  : Set effort (0-100%) for open-loop control [Effort mode]
-    t      : Set velocity setpoint (ticks/s) for closed-loop control [Velocity mode]
-    p      : Set proportional gain (Kp) for controller [Velocity mode]
-    i      : Set integral gain (Ki) for controller [Velocity mode]
-    g      : GO (start test)
-    k      : Kill (stop) motors
-    r      : Run automated sequence (0 to 100% by 10%)
-    x      : Plot all runs' left velocity
-    s      : Stream data
-    ----  o      : Override existing run
-    m      : Toggle mode (Set to straight by default)
-    d      : Print CSV data to Terminal
-    c      : Run automated closed-loop test
-    h      : Help / show this menu
-    ctrl-c : Interrupt this program\r\n'''
-
-# Function to create dictionary for storing data from one run
-def create_run(control_val, size):
-    time = np.zeros(size)
-    p1 = np.zeros(size)
-    p2 = np.zeros(size)
-    v1 = np.zeros(size)
-    v2 = np.zeros(size)
-    ctrl = np.zeros(size)  # Store control value (effort or setpoint)
-
-    df = pd.DataFrame({
-        "_time": time,
-        "_control": ctrl,
-        "_left_pos": p1,
-        "_right_pos": p2,
-        "_left_vel": v1,
-        "_right_vel": v2
-    })
-
-    return {"control_val": control_val, "size": size, "motor_data": df}
-
-# Function to check if run has been created for a particular effort value
-def has_eff(runs, eff_value):
-    for run in runs.values():
-        if run["eff"] == eff_value:
-            return True    
-    return False
 
 
-def clean_data(df, cols=None, mode='all'):
+# Automated velocity-sweep test
+def auto_velocity_sweep():
+    """Sweep Kp over a range for a single setpoint and fixed Ki.
+    Prompts: setpoint (int ticks/s), kp_min, kp_max, kp_step (floats), ki (float).
+    Runs tests, collects streamed data into `runs`, saves per-run CSVs and
+    creates an overlay plot saved to the runs folder.
     """
-    Clean DataFrame by removing all zero rows except initial zeros up to the first non-zero data.
-    
-    Parameters:
-      df: pandas.DataFrame
-      cols: list of columns to check. If None, defaults to all motor_data columns.
-      mode: 'all' -> remove rows where ALL specified cols are zero;
-            'any' -> remove rows where ANY specified cols are zero.
+    global ser, runs, run_count, control_mode
 
-    Returns: (cleaned_df, removed_count)
-    """
-    if cols is None:
-        cols = ["_time", "_left_pos", "_right_pos", "_left_vel", "_right_vel"]
+    try:
+        setpoint = int(input("Enter velocity setpoint (ticks/s): "))
+        kp_min = float(input("Enter Kp minimum: "))
+        kp_max = float(input("Enter Kp maximum: "))
+        kp_step = float(input("Enter Kp step: "))
+        ki = float(input("Enter Ki (fixed for sweep): "))
+    except ValueError:
+        print("Invalid input. Aborting sweep.")
+        return
 
-    # Ensure columns exist
+    if kp_step == 0:
+        print("kp_step cannot be zero")
+        return
+
+    # Build kp list
+    kp_values = []
+    v = kp_min
+    if kp_step > 0:
+        while v <= kp_max + 1e-12:
+            kp_values.append(round(v, 6))
+            v += kp_step
+    else:
+        while v >= kp_max - 1e-12:
+            kp_values.append(round(v, 6))
+            v += kp_step
+
+    if not kp_values:
+        print("No Kp values generated for given range/step")
+        return
+
+    print(f"Running sweep with {len(kp_values)} Kp values: {kp_values}")
+
+    # Ensure MCU in velocity mode
+    if control_mode:
+        ser.write(b'e')
+        control_mode = False
+        sleep(0.15)
+
+    sweep_run_names = []
+    ts = int(time())
+
+    try:
+        for kp in kp_values:
+            print(f"Starting test for Kp={kp}, Ki={ki}, SP={setpoint}")
+
+            try:
+                ser.reset_input_buffer()
+            except Exception:
+                pass
+
+            # Send Kp and Ki
+            kp_int = int(abs(kp) * 100)
+            ser.write(f"p{kp_int:04d}".encode())
+            sleep(0.08)
+            ki_int = int(abs(ki) * 100)
+            ser.write(f"i{ki_int:04d}".encode())
+            sleep(0.08)
+
+            # Send setpoint
+            sp_cmd = 'y' if setpoint >= 0 else 'z'
+            sp_cmd += f"{abs(setpoint):04d}"
+            ser.write(sp_cmd.encode())
+            sleep(0.08)
+
+            # Start
+            ser.write(b'g')
+
+            # Wait for 'q'
+            while True:
+                if ser.in_waiting:
+                    ch = ser.read().decode(errors='ignore')
+                    if ch == 'q':
+                        print("Test complete signal received")
+                        break
+                else:
+                    sleep(0.05)
+
+            # Stream
+            ser.write(b's')
+            sleep(0.12)
+
+            header = ser.readline().decode().strip()
+            parts = header.split(',')
+            try:
+                if parts[0] in ('V', 'v'):
+                    if len(parts) < 5:
+                        raise ValueError("not enough fields for velocity header")
+                    _mode = parts[0]
+                    _control_val = float(parts[1])
+                    kp_hdr = float(parts[2])
+                    ki_hdr = float(parts[3])
+                    _size = int(parts[4])
+                    params = {'kp': kp_hdr, 'ki': ki_hdr}
+                elif parts[0] in ('E', 'e'):
+                    if len(parts) < 3:
+                        raise ValueError("not enough fields for effort header")
+                    _mode = parts[0]
+                    _control_val = float(parts[1])
+                    _size = int(parts[2])
+                    params = None
+                else:
+                    raise ValueError("unknown mode in header")
+            except Exception as e:
+                print(f"Failed to parse header '{header}': {e}")
+                continue
+
+            run_count += 1
+            run_name = f'run{run_count}'
+            runs[run_name] = create_run(_control_val, _size)
+            if params:
+                runs[run_name]['params'] = params
+            runs[run_name]['mode'] = _mode
+            print(f"Created {run_name} (mode={_mode}, size={_size})")
+
+            line_num = 0
+            while line_num <= _size - 1:
+                line = ser.readline().decode().strip()
+                if not line:
+                    continue
+                try:
+                    time_s, left_pos, right_pos, left_vel, right_vel = line.split(',')
+                    runs[run_name]['motor_data'].loc[line_num, '_time'] = float(time_s)
+                    runs[run_name]['motor_data'].loc[line_num, '_left_pos'] = float(left_pos)
+                    runs[run_name]['motor_data'].loc[line_num, '_right_pos'] = float(right_pos)
+                    runs[run_name]['motor_data'].loc[line_num, '_left_vel'] = float(left_vel)
+                    runs[run_name]['motor_data'].loc[line_num, '_right_vel'] = float(right_vel)
+                    line_num += 1
+                except ValueError:
+                    print(f"Line {line_num} rejected. Contents: {line}")
+                    line_num += 1
+
+            print(f"Finished streaming for {run_name}")
+            sweep_run_names.append(run_name)
+
+        # Overlay plot
+        if sweep_run_names:
+            plt.figure()
+            for rn in sweep_run_names:
+                meta = runs[rn]
+                df = meta['motor_data']
+                df_clean, removed = clean_data(df, mode='all')
+                if removed:
+                    print(f"Removed {removed} all-zero rows from {rn} before plotting")
+                mode_char = meta.get('mode', 'E')
+                control_val = meta.get('control_val', 'unknown')
+                if mode_char in ('V', 'v'):
+                    kp_v = meta.get('params', {}).get('kp', 0)
+                    ki_v = meta.get('params', {}).get('ki', 0)
+                    label = f"Kp={kp_v:.2f} Ki={ki_v:.2f} SP={control_val}"
+                else:
+                    label = f"Eff={control_val}"
+                plt.plot(df_clean['_time'], df_clean['_left_vel'], label=label)
+
+            plt.xlabel('Time, [ms]')
+            plt.ylabel('Left velocity, [rad/s]')
+            plt.legend()
+            overlay_name = f"runs/velocity_sweep_{ts}_overlay.png"
+            plt.savefig(overlay_name)
+            plt.close()
+            print(f"Saved overlay plot to {overlay_name}")
+
+    except KeyboardInterrupt:
+        print("\nSweep interrupted by user")
+        return
+
+
+# Function to run an automated closed-loop test
+def run_closed_loop_test():
     cols = [c for c in cols if c in df.columns]
     if not cols:
         return df, 0
@@ -269,6 +369,9 @@ def auto_run_sequence(efforts):
 
 # Function to run an automated closed-loop test
 def run_closed_loop_test():
+    # Placeholder for future auto_velocity_sweep function
+    pass
+
     global ser, runs, run_count, current_setpoint, control_mode, streaming, running
 
     if control_mode:
@@ -288,7 +391,7 @@ def run_closed_loop_test():
         # Get test parameters from user
         kp = float(input("Enter proportional gain (Kp): "))
         ki = float(input("Enter integral gain (Ki): "))
-        setpoint = int(input("Enter velocity setpoint (ticks/s): "))
+        setpoint = int(input("Enter velocity setpoint (rad/s): "))
 
         # Send Kp
         kp_int = int(kp * 100)
@@ -312,7 +415,7 @@ def run_closed_loop_test():
         print(f"\nTest parameters set:")
         print(f"Kp: {kp}")
         print(f"Ki: {ki}")
-        print(f"Setpoint: {setpoint} ticks/s")
+        print(f"Setpoint: {setpoint} rad/s")
         input("Press Enter to start the test...")
 
         # Start test
@@ -456,7 +559,7 @@ while True:
                 else:
                     try:
                         # Get setpoint from user
-                        setpoint = input("Enter velocity setpoint (ticks/s): ")
+                        setpoint = input("Enter velocity setpoint (rad/s): ")
                         setpoint = int(setpoint)
                         # Format: 'yXXXX' for positive, 'zXXXX' for negative
                         cmd = 'y' if setpoint >= 0 else 'z'  # 'y' for positive, 'z' for negative
@@ -464,7 +567,7 @@ while True:
                         ser.write(cmd.encode())
                         current_setpoint = setpoint
                         sign_str = "+" if setpoint >= 0 else "-"
-                        print(f"Velocity setpoint set to {sign_str}{abs(setpoint)} ticks/s")
+                        print(f"Velocity setpoint set to {sign_str}{abs(setpoint)} rad/s")
                     except ValueError:
                         print("Invalid input. Please enter an integer.")
 
@@ -520,23 +623,41 @@ while True:
                     plt.plot(x, y)
                     plt.xlabel("Time, [ms]")
                     plt.ylabel("Left velocity, [rad/s]")
-                    eff_val = runs[run_name].get('eff', runs[run_name].get('eff:', 'unknown'))
-                    # instead of plt.show()
-                    plt.savefig(f"runs/{run_name}_effort_{eff_val}_left_vel.png")
+
+                    # Determine whether this run was in effort or velocity mode and build filenames accordingly
+                    run_mode = runs[run_name].get('mode', 'E')  # 'E' or 'V'
+                    control_val = runs[run_name].get('control_val', 'unknown')
+
+                    if run_mode in ('V', 'v'):
+                        params = runs[run_name].get('params', {})
+                        kp = params.get('kp', 0.0)
+                        ki = params.get('ki', 0.0)
+                        label = f"SP={control_val} Kp={kp:.2f} Ki={ki:.2f}"
+                        fig_name = f"runs/{run_name}_V_sp{control_val}_Kp{kp:.2f}_Ki{ki:.2f}_left_vel.png"
+                        csv_name = f"runs/{run_name}_V_sp{control_val}_Kp{kp:.2f}_Ki{ki:.2f}.csv"
+                    else:
+                        # Effort mode
+                        label = f"Effort={control_val}"
+                        fig_name = f"runs/{run_name}_E_eff{control_val}_left_vel.png"
+                        csv_name = f"runs/{run_name}_E_eff{control_val}.csv"
+
+                    # Add legend with the control parameters
+                    try:
+                        plt.legend([label])
+                    except Exception:
+                        pass
+
+                    # Save figure and CSV
+                    plt.savefig(fig_name)
                     plt.close()
 
-                    # Save motor_data to CSV inside the 'runs' folder. Try to get effort value from either 'eff' or 'eff:' key.
-                    # try:
-                    #     os.makedirs('runs', exist_ok=True)
-                    #     filename = os.path.join('runs', f"{run_name}_eff{eff_val}.csv")
-                    #     df_clean.to_csv(filename, index=False)
-                    #     print(f"Saved motor_data to {filename}")
-                    # except Exception as e:
-                    #     print(f"Failed to save CSV: {e}")
-                    
-                    filename = os.path.join('runs', f"{run_name}_eff{eff_val}.csv")
-                    df_clean.to_csv(filename, index=False)
-                    print(f"Saved motor_data to {filename}")
+                    try:
+                        df_clean.to_csv(csv_name, index=False)
+                        print(f"Saved motor_data to {csv_name}")
+                    except Exception as e:
+                        print(f"Failed to save CSV {csv_name}: {e}")
+
+                    print(f"Saved figure to {fig_name}")
                     print(user_prompt)
 
             elif key == 'r':
