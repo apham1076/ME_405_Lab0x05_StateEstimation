@@ -26,7 +26,8 @@ class MotorControlTask:
                  left_encoder, right_encoder,
                  battery,
                  eff, mtr_enable, abort, mode, setpoint, kp, ki, control_mode,
-                 time_sh, left_pos_sh, right_pos_sh, left_vel_sh, right_vel_sh):
+                 time_sh, left_pos_sh, right_pos_sh, left_vel_sh, right_vel_sh,
+                 lf_enable=None, left_eff_sh=None, right_eff_sh=None):
 
         # Hardware
         self.left_motor = left_motor
@@ -42,7 +43,10 @@ class MotorControlTask:
         self.kp = kp
         self.ki = ki
         self.control_mode = control_mode
-        
+        self.lf_enable = lf_enable
+        self.left_eff_sh = left_eff_sh
+        self.right_eff_sh = right_eff_sh
+
         # Queues
         self.time_sh = time_sh
         self.left_pos_sh = left_pos_sh
@@ -130,8 +134,40 @@ class MotorControlTask:
                 # print(f"Encoder Positions - Left: {pL}, Right: {pR}")
                 # print(f"Encoder Velocities - Left: {vL}, Right: {vR}")
 
-                if self.control_mode.get():  # Velocity mode
-                    # print("Entering velocity mode")
+                # --------------------------------------------------------------
+                # Determine which control mode to use: Line Follow, Velocity, or Effort
+                # --------------------------------------------------------------
+                if (self.lf_enable is not None) and self.lf_enable.get():
+                    # ----------------------------------------------------------
+                    # LINE FOLLOW MODE
+                    # ----------------------------------------------------------
+                    # Retrieve left/right efforts published by the line follow task
+                    left_effort  = float(self.left_eff_sh.get()  if self.left_eff_sh  else 0)
+                    right_effort = float(self.right_eff_sh.get() if self.right_eff_sh else 0)
+
+                    # Apply battery droop compensation
+                    if self.battery is not None:
+                        try:
+                            gain = self.battery.droop_gain()
+                            left_effort  *= gain
+                            right_effort *= gain
+                        except Exception:
+                            pass  # fall back to raw efforts if ADC/battery read fails
+
+                    # Clamp and apply
+                    left_effort  = max(-100, min(100, left_effort))
+                    right_effort = max(-100, min(100, right_effort))
+                    self.left_motor.set_effort(left_effort)
+                    self.right_motor.set_effort(right_effort)
+
+                    # Reset PI controllers since we're not using them in this mode
+                    self.left_controller.reset()
+                    self.right_controller.reset()
+
+                elif self.control_mode.get():  # Velocity mode
+                    # ----------------------------------------------------------
+                    # VELOCITY (CLOSED LOOP) MODE
+                    # ----------------------------------------------------------
                     # Update controller parameters
                     kp = self.kp.get()  # Convert from fixed-point
                     ki = self.ki.get()
@@ -156,7 +192,10 @@ class MotorControlTask:
                     self.left_motor.set_effort(left_effort)
                     self.right_motor.set_effort(right_effort)
 
-                else:  # Effort mode (direct control)
+                else:
+                    # ----------------------------------------------------------
+                    # EFFORT (OPEN LOOP) MODE
+                    # ----------------------------------------------------------
                     # print("In effort mode")
                     effort = float(self.eff.get())
 
@@ -165,16 +204,18 @@ class MotorControlTask:
                         try:
                             effort *= self.battery.droop_gain()
                         except Exception:
-                            pass # fall back to raw effort on any ADC/battery reading error
+                            pass  # fall back to raw effort on any ADC/battery reading error
                     
                     # Clamp to safe limits and apply effort
-                    effort = max(-100, min(100, effort))
-                    self.left_motor.set_effort(effort)
-                    self.right_motor.set_effort(effort)
+                    left_effort  = max(-100, min(100, effort))
+                    right_effort = max(-100, min(100, effort))
+                    self.left_motor.set_effort(left_effort)
+                    self.right_motor.set_effort(right_effort)
 
                     # Reset controllers when not in use
                     self.left_controller.reset()
                     self.right_controller.reset()
+
 
                 # Calculate the exact timestamp of the measurement
                 t = millis() - self.t0
