@@ -31,8 +31,9 @@ class UITask:
     ### Initialize the object's attributes
     # --------------------------------------------------------------------------
     def __init__(self,
-                 col_start, col_done, mtr_enable, stream_data,
-                 uart5, abort, eff, mode, setpoint, kp, ki, control_mode,
+                 col_start, col_done, mtr_enable, stream_data, abort,
+                 eff, driving_mode, setpoint, kp, ki, control_mode,
+                 uart5, battery,
                  time_q, left_pos_q, right_pos_q, left_vel_q, right_vel_q):
         
         # Flags
@@ -40,16 +41,22 @@ class UITask:
         self.col_done = col_done
         self.mtr_enable = mtr_enable
         self.stream_data = stream_data
-        # Abort flag
         self.abort = abort
         
         # Shares
         self.eff = eff
-        self.mode = mode
+        self.driving_mode = driving_mode
         self.setpoint = setpoint  # Share for velocity setpoint
         self.kp = kp  # Share for proportional gain
         self.ki = ki  # Share for integral gain
         self.control_mode = control_mode  # Share for control mode (effort/velocity)
+
+        # Serial interface (USB virtual COM port)
+        # self.ser = USB_VCP()
+        # Serial interface (Bluetooth port)
+        self.ser = uart5
+        # Battery object
+        self.battery = battery
 
         # Queues
         self.time_q = time_q
@@ -58,17 +65,10 @@ class UITask:
         self.left_vel_q = left_vel_q
         self.right_vel_q = right_vel_q
 
-        # Serial interface (USB virtual COM port)
-        # self.ser = USB_VCP()
-        # Serial interface (Bluetooth port)
-        self.ser = uart5
-
         # ensure FSM starts in state S0_INIT
         self.state = self.S0_INIT
 
-        # # List of acceptable characters
-        # self.char_list = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a"]
-        # # Input to PWM value dictionary mappings
+
         # self.char_dict = {"0": 0,
         #                 "1": 10,
         #                 "2": 20,
@@ -94,7 +94,7 @@ class UITask:
                 self.col_done.put(0)
                 self.last_eff = 0
                 self.abort.put(0)
-                self.mode.put(1)
+                self.driving_mode.put(1) # default to straight line mode
                 
                 self.state = self.S1_WAIT_FOR_COMMAND
 
@@ -118,7 +118,7 @@ class UITask:
             ### 2: PROCESS COMMAND STATE ---------------------------------------
             elif self.state == self.S2_PROCESS_COMMAND:
                 cmd = self.cmd_buf
-                # Handle setpoint commands ('m' or 'n' followed by 4 digits)
+                # Velocity setpoint message: 'y' + 4 digits for >= 0, or 'z' + 4 digits for < 0
                 if cmd in ['y', 'z'] and self.ser.any() >= 4:
                     # Read the 4 digits for setpoint value
                     value_str = self.ser.read(4).decode()
@@ -231,15 +231,27 @@ class UITask:
 
                 # 'm' → TOGGLE MODE
                 elif cmd == 'm':
-                    if not self.mtr_enable.get():
-                        if self.mode == 1:
-                            self.mode = 2
-                            continue
-                        elif self.mode == 2:
-                            self.mode = 3
-                            continue
+                    # Toggle driving mode (1 = straight, 2 = pivot, 3 = arc)
+                    if not self.mtr_enable.get():            # only change when stopped
+                        current_mode = self.driving_mode.get() or 1
+
+                        if current_mode == 1:
+                            new_mode = 2
+                            print("Driving mode set to: Pivot")
+                        elif current_mode == 2:
+                            new_mode = 3
+                            print("Driving mode set to: Arc")
                         else:
-                            self.mode = 1
+                            new_mode = 1
+                            print("Driving mode set to: Straight")
+
+                        self.driving_mode.put(new_mode)
+                
+                # 'v' → print current battery voltage
+                elif cmd == 'v':
+                    v_batt = self.battery.read_voltage()
+                    voltage_msg = f"{v_batt:.2f}\n"
+                    self.ser.write(voltage_msg.encode()) # send over bluetooth UART
 
                 # Anything else → ignore, Shouldn't need to worry about other commmands handled by PC
                 else:

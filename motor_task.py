@@ -7,10 +7,6 @@
 # updates time/pos/vel shares, and applies the latest motor efforts.
 # ==============================================================================
 
-# To-do: Determine limits for Yaw controller, need to define midpoint location,
-#       need to define nominal translational velocity, define Romi parameters like trackwdith and wheel radius,
-#       double check yaw rate to velocity calculations
-
 from pyb import millis
 from closed_loop import ClosedLoop
 
@@ -28,17 +24,16 @@ class MotorControlTask:
     def __init__(self,
                  left_motor, right_motor,
                  left_encoder, right_encoder,
-                 IR_arr,
+                 battery,
                  eff, mtr_enable, abort, mode, setpoint, kp, ki, control_mode,
-                 time_sh, left_pos_sh, right_pos_sh, left_vel_sh, right_vel_sh,
-                 kpy, kiy):
+                 time_sh, left_pos_sh, right_pos_sh, left_vel_sh, right_vel_sh):
 
         # Hardware
         self.left_motor = left_motor
         self.right_motor = right_motor
         self.left_encoder = left_encoder
         self.right_encoder = right_encoder
-        self.IR_arr = IR_arr
+        self.battery = battery
 
         # Shares
         self.eff = eff
@@ -46,8 +41,6 @@ class MotorControlTask:
         self.setpoint = setpoint
         self.kp = kp
         self.ki = ki
-        self.kpy = kpy
-        self.kiy = kiy
         self.control_mode = control_mode
         
         # Queues
@@ -64,10 +57,30 @@ class MotorControlTask:
         # Controllers
         self.left_controller = ClosedLoop(effort_limits=(-100, 100))
         self.right_controller = ClosedLoop(effort_limits=(-100, 100))
-        self.yaw_controller = ClosedLoop(yaw_limits=(-1, 1))
+        # Attach battery objects to controllers for voltage droop
+        self.left_controller.attach_battery(self.battery)
+        self.right_controller.attach_battery(self.battery)
         
         self.t0 = 0 # zero the start time offset
         self.state = self.S0_INIT # ensure FSM starts in state S0_INIT
+
+    # --------------------------------------------------------------------------
+    ### HELPER FUNCTIONS
+    # --------------------------------------------------------------------------
+    ### Split setpoints for left and right motors based on driving mode
+    def _split_setpoints(self, mode_val, setpoint):
+        """
+        mode 1: straight  -> (spL, spR) = (sp, sp)
+        mode 2: pivot     -> (spL, spR) = ( sp, -sp)
+        mode 3: arc       -> (spL, spR) = ( sp, sp*RATIO )
+        """
+        if mode_val == 1:            # straight
+            return setpoint, setpoint
+        elif mode_val == 2:          # pivot in place
+            return setpoint, -setpoint
+        else:                        # arc (simple fixed ratio; refine later if desired)
+            RATIO = 0.6
+            return setpoint, int(setpoint * RATIO)
 
     # --------------------------------------------------------------------------
     ### FINITE STATE MACHINE
@@ -89,12 +102,6 @@ class MotorControlTask:
                 # Reset controllers
                 self.left_controller.reset()
                 self.right_controller.reset()
-                self.yaw_controller.reset()
-
-                # Set gains
-                self.left_controller.set_gains(self.kp.get(), self.ki.get())
-                self.right_controller.set_gains(self.kp.get(), self.ki.get())
-                self.yaw_controller.set_gains(self.kpy.get(), self.kiy.get())
 
                 self.state = self.S1_WAIT_FOR_EFF # set next state
 
@@ -111,7 +118,6 @@ class MotorControlTask:
             
             ### RUN STATE ------------------------------------------------------
             elif (self.state == self.S2_RUN):
-
                 # Update encoders
                 self.left_encoder.update()
                 self.right_encoder.update()
@@ -121,23 +127,54 @@ class MotorControlTask:
                 pR = self.right_encoder.get_position()
                 vL = self.left_encoder.get_velocity()
                 vR = self.right_encoder.get_velocity()
+                # print(f"Encoder Positions - Left: {pL}, Right: {pR}")
+                # print(f"Encoder Velocities - Left: {vL}, Right: {vR}")
 
-                # Run steering controller
-                self._update_setpoint()
+                if self.control_mode.get():  # Velocity mode
+                    # print("Entering velocity mode")
+                    # Update controller parameters
+                    kp = self.kp.get()  # Convert from fixed-point
+                    ki = self.ki.get()
+                    setpoint = self.setpoint.get()
+                    
+                    # Update controller gains if needed
+                    self.left_controller.set_gains(kp, ki)
+                    self.right_controller.set_gains(kp, ki)
+                    
+                    # Update setpoints (per driving mode)
+                    mode_val = self.mode.get() or 1  # Default to straight if mode not set
+                    sp = self.setpoint.get()
+                    spL, spR = self._split_setpoints(mode_val, sp)
+                    self.left_controller.set_setpoint(spL)
+                    self.right_controller.set_setpoint(spR)
 
-                # Update setpoints
-                self.left_controller.set_setpoint(self.left_vel_setpoint)
-                self.right_controller.set_setpoint(self.right_vel_setpoint)
-                
-                # Calculate control efforts
-                left_effort = self.left_controller.run(vL)
-                right_effort = self.right_controller.run(vR)
-                
-                # print(f"Setpoint: {setpoint}, Left Vel: {vL}, Right Vel: {vR}, Left Effort: {left_effort}, Right Effort: {right_effort}")
+                    # Calculate control efforts
+                    left_effort = self.left_controller.run(vL)
+                    right_effort = self.right_controller.run(vR)
 
-                # Apply efforts
-                self.left_motor.set_effort(left_effort)
-                self.right_motor.set_effort(right_effort)
+                    # Apply efforts
+                    self.left_motor.set_effort(left_effort)
+                    self.right_motor.set_effort(right_effort)
+
+                else:  # Effort mode (direct control)
+                    # print("In effort mode")
+                    effort = float(self.eff.get())
+
+                    # Apply battery droop compensation in open-loop (effort) mode
+                    if self.battery is not None:
+                        try:
+                            effort *= self.battery.droop_gain()
+                        except Exception:
+                            pass # fall back to raw effort on any ADC/battery reading error
+                    
+                    # Clamp to safe limits and apply effort
+                    effort = max(-100, min(100, effort))
+                    self.left_motor.set_effort(effort)
+                    self.right_motor.set_effort(effort)
+
+                    # Reset controllers when not in use
+                    self.left_controller.reset()
+                    self.right_controller.reset()
 
                 # Calculate the exact timestamp of the measurement
                 t = millis() - self.t0
@@ -170,18 +207,3 @@ class MotorControlTask:
                     self.state = self.S1_WAIT_FOR_EFF
             
             yield self.state
-
-# --------------------------------------------------------------------------
-### Helper functions
-# --------------------------------------------------------------------------
-    def _update_setpoint(self):
-        # Reads from sensors and get centroid
-        xc = self.IR_arr.get_centroid()
-
-        # Use centroid to get a yaw rate
-        yaw_rate = self.yaw_controller.run(xc)
-
-        # Update velocitiy setpoint values
-        # yaw > 0 is turn left, yaw < 0 is turn right
-        self.left_vel_setpoint -= yaw_rate * self.trackwidth / 2
-        self.right_vel_setpoint += yaw_rate * self.trackwidth / 2
