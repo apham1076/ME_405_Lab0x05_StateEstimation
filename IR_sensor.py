@@ -48,68 +48,45 @@ class IR_sensor_single:
         return n
 
 
-class IR_sensor_array:
-    '''Reads from an array of ADC pins, includes method to compute centroid'''
-    def __init__(self,
-                 adcs,      # List/tuple of ADC objects
-                 tim: Timer,
-                 sensor_index,      # List containing indexes of each sensor [1, 2, 3, ... n]
-                 samples=100):
-                
-        # Initialization
+class IRArray:
+    """Reads from an array of ADC pins and computes line centroid."""
+
+    def __init__(self, adcs, tim, sensor_index=None, samples=100):
         self.adcs = list(adcs)
         self.tim = tim
-        self.sens_idx = sensor_index
         self.samples = samples
         self.num = len(self.adcs)
         self.black = [0] * self.num
         self.white = [0] * self.num
+        # Default indices (1..N) if not given
+        self.sensor_index = sensor_index if sensor_index else list(range(1, self.num + 1))
+        self.norm = [0.0] * self.num
 
     def calibrate(self, color: str):
-        # Create buffers
-        bufs = [array.array('H', [0] * self.samples) for n in range(self.num)]
-
-        # Read ADCs
-        self.adc.read_timed_multi(tuple(self.adcs),
-                                  tuple(bufs),
-                                  self.tim)
-        # Compute averages
+        import array
+        bufs = [array.array('H', [0] * self.samples) for _ in range(self.num)]
+        from pyb import ADC
+        ADC.read_timed_multi(tuple(self.adcs), tuple(bufs), self.tim)
         avgs = [sum(b) / len(b) for b in bufs]
-
         target = self.black if color == 'b' else self.white
-        for idx, val in enumerate(avgs):
-            target[idx] = val
+        for i, val in enumerate(avgs):
+            target[i] = val
 
     def read(self):
-        # Read raw values from each ADc
         raw = [adc.read() for adc in self.adcs]
-
-        # Normalize values with safeties and saturation
         self.norm = []
         for i, r in enumerate(raw):
-            b = self.black[i]
-            w = self.white[i]
+            b, w = self.black[i], self.white[i]
             denom = b - w
-            # Check for denominator equals zero
-            if denom == 0:
-                n = 0.0
-            else:
-                n = (r - w) / denom
-            # Saturate if necessary
-            if n > 1:
-                n = 1.0
-            elif n < 1:
-                n = 0.0
+            n = (r - w) / denom if denom != 0 else 0.0
+            n = min(max(n, 0.0), 1.0)
             self.norm.append(n)
         return self.norm
 
     def get_centroid(self):
-        self.read()     # Get normalized ADC reading
-        n_sum = 0
-        d_sum = 0
-        for i, s in enumerate(self.sens_idx):
-            n_sum += s[i] * self.norm[i]
-            d_sum += self.norm[i]
-            
-        return n_sum / d_sum
+        self.read()
+        weighted_sum = sum(idx * val for idx, val in zip(self.sensor_index, self.norm))
+        total = sum(self.norm)
+        return weighted_sum / total if total != 0 else 0.0
+
         
