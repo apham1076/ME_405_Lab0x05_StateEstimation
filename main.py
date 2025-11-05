@@ -42,13 +42,13 @@ import task_share
 from pyb import Pin, UART, Timer, ADC
 from motor import Motor
 from encoder import Encoder
-from battery_droop import Battery
-from IR_sensor import IRArray
+# from battery_droop import Battery
+# from IR_sensor import IRArray
 from motor_task import MotorControlTask
 from data_task import DataCollectionTask
 from ui_task import UITask
 from stream_task import StreamTask
-from steering_task import SteeringTask
+# from steering_task import SteeringTask
 
 
 def main():
