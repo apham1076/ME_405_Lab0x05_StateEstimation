@@ -39,16 +39,16 @@ Motor task will remain unchanged
 import gc
 import cotask
 import task_share
-from pyb import Pin, UART
+from pyb import Pin, UART, Timer
 from motor import Motor
 from encoder import Encoder
-from battery_droop import Battery
-from IR_sensor import IRArray
+# from battery_droop import Battery
+# from IR_sensor import IRArray
 from motor_task import MotorControlTask
 from data_task import DataCollectionTask
 from ui_task import UITask
 from stream_task import StreamTask
-from steering_task import SteeringTask
+# from steering_task import SteeringTask
 
 
 def main():
@@ -56,15 +56,48 @@ def main():
     MAX_SAMPLES = 250
     
     # Hardware Setup:
+    # Configure Pins and Timers
+
+    # Motor Pins
+    # PB3 = Pin(Pin.cpu.B3, mode=Pin.OUT_PP)
+    # PB5 = Pin(Pin.cpu.B5, mode=Pin.OUT_PP)
+    # PB4 = Pin(Pin.cpu.B4, mode=Pin.OUT_PP)
+    # PB8 = Pin(Pin.cpu.B8, mode=Pin.OUT_PP)
+    # PB9 = Pin(Pin.cpu.B9, mode=Pin.OUT_PP)
+    # PC9 = Pin(Pin.cpu.C9, mode=Pin.OUT_PP)
+    # # Encoder Pins
+    # PA9 = Pin(Pin.cpu.A9, mode=Pin.OUT_PP)
+    # PA8 = Pin(Pin.cpu.C8, mode=Pin.OUT_PP)
+    # PC6 = Pin(Pin.cpu.C6, mode=Pin.OUT_PP)
+    # PC7 = Pin(Pin.cpu.C7, mode=Pin.OUT_PP)
+    # # IR Pins
+    # PA0 = Pin(Pin.cpu.A0, mode=Pin.IN)
+    # PA1 = Pin(Pin.cpu.A1, mode=Pin.IN)
+    # PA4 = Pin(Pin.cpu.A4, mode=Pin.IN)
+    # PB0 = Pin(Pin.cpu.B0, mode=Pin.IN)
+    # PC1 = Pin(Pin.cpu.C1, mode=Pin.IN)
+    # PC0 = Pin(Pin.cpu.C0, mode=Pin.IN)
+    # PC2 = Pin(Pin.cpu.C2, mode=Pin.IN)
+    # PC3 = Pin(Pin.cpu.C3, mode=Pin.IN)
+    # PC4 = Pin(Pin.cpu.C4, mode=Pin.IN)
+    # PB1 = Pin(Pin.cpu.B1, mode=Pin.IN)
+    # PA7 = Pin(Pin.cpu.A7, mode=Pin.IN)
+
+    # # Timers and channels
+    # tim3 = Timer(3, freq=20000)
+    # chan3 = tim3.channel(4, pin=PB1, mode=Timer.PWM, pulse_width_percent = 0)
+    # chan4 = tim3.channel(3, pin=PB0, mode=Timer.PWM, pulse_width_percent = 0)
+    
+
     # Create motor and encoder objects
-    left_motor = Motor(Pin.cpu.B1, Pin.cpu.B5, Pin.cpu.B3, 3, 4)
-    right_motor = Motor(Pin.cpu.B0, Pin.cpu.C0, Pin.cpu.C1, 3, 3)
-    left_encoder = Encoder(1, Pin.cpu.A8, Pin.cpu.A9)
-    right_encoder = Encoder(2, Pin.cpu.A0, Pin.cpu.A1)
-    battery = Battery(Pin.cpu.A4) # battery voltage measurement object
-    tim6 = Timer(6, freq=1000) # timer for ADC sampling (can be reused by the IR array)
-    ir_pins = [Pin.cpu.xx, Pin.cpu.xy, Pin.cpu.xz, Pin.cpu.xw, Pin.cpu.xv]  # replace xx, xy, xz, xw, xv with actual pin names
-    ir_array = IRArray(ir_pins, tim6, samples=100)  # IR sensor array object
+    left_motor = Motor(Pin.cpu.B4, Pin.cpu.B5, Pin.cpu.B3, 3, 1)
+    right_motor = Motor(Pin.cpu.B8, Pin.cpu.B9, Pin.cpu.C9, 4, 3)
+    left_encoder = Encoder(1, Pin.cpu.A9, Pin.cpu.A8)
+    right_encoder = Encoder(8, Pin.cpu.C6, Pin.cpu.C7)
+    # battery = Battery(Pin.cpu.A4) # battery voltage measurement object
+    # tim6 = Timer(6, freq=1000) # timer for ADC sampling (can be reused by the IR array)
+    # ir_pins = [Pin.cpu.xx, Pin.cpu.xy, Pin.cpu.xz, Pin.cpu.xw, Pin.cpu.xv]  # replace xx, xy, xz, xw, xv with actual pin names
+    # ir_array = IRArray(ir_pins, tim6, samples=100)  # IR sensor array object
 	
     # -----------------------------------------------------------------------
     ### Shared Variables: create shares and queues (inter-task communication)
