@@ -19,14 +19,13 @@ class SteeringTask:
     S3_LOST = 3
 
     def __init__(self, ir_array, battery,
-                 lf_enable, ir_cmd,
+                 ir_cmd,
                  left_sp_sh, right_sp_sh):
         # Hardware
         self.ir = ir_array
         self.battery = battery
 
         # Shares
-        self.lf_enable = lf_enable
         self.ir_cmd = ir_cmd
         self.left_sp_sh = left_sp_sh # share for left motor velocity setpoint
         self.right_sp_sh = right_sp_sh # share for right motor velocity setpoint
@@ -90,12 +89,12 @@ class SteeringTask:
             # S1: WAIT FOR ENABLE ----------------------------------------------
             elif self.state == self.S1_WAIT_ENABLE:
                 self._publish(0.0, 0.0) # ensure motors are stopped
-                if self.lf_enable.get(): # if line following enabled
+                if self.control_mode.get() == 2: # if line following enabled
                     self.state = self.S2_FOLLOW # go to FOLLOW state
 
             # S2: FOLLOW LINE -------------------------------------------------
             elif self.state == self.S2_FOLLOW:
-                if not self.lf_enable.get(): # if line following disabled
+                if self.control_mode.get() != 2: # if line following disabled
                     self._publish(0.0, 0.0) # ensure motors are stopped
                     self.state = self.S1_WAIT_ENABLE # go to WAIT ENABLE state
                 else:
@@ -121,7 +120,7 @@ class SteeringTask:
 
             # S3: LOST LINE --------------------------------------------------
             elif self.state == self.S3_LOST:
-                if not self.lf_enable.get(): # if line following disabled
+                if self.control_mode.get() != 2: # if line following disabled
                     self._publish(0.0, 0.0) # ensure motors are stopped
                     self.state = self.S1_WAIT_ENABLE # go to WAIT ENABLE state
                 else:
