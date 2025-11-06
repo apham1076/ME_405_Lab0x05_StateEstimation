@@ -263,6 +263,7 @@ class UITask:
                 elif cmd == 'l':   # Toggle line-follow (on/off)
                     if self.lf_enable:
                         self.lf_enable.put(0 if self.lf_enable.get() else 1)
+                        print("Toggled line-follow to:", self.lf_enable.get())
 
 
                 # Anything else → ignore, Shouldn't need to worry about other commmands handled by PC

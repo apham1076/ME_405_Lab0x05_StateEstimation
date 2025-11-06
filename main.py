@@ -42,13 +42,13 @@ import task_share
 from pyb import Pin, UART, Timer, ADC
 from motor import Motor
 from encoder import Encoder
-# from battery_droop import Battery
-# from IR_sensor import IRArray
+from battery_droop import Battery
+from IR_sensor import IRArray
 from motor_task import MotorControlTask
 from data_task import DataCollectionTask
 from ui_task import UITask
 from stream_task import StreamTask
-# from steering_task import SteeringTask
+from steering_task import SteeringTask
 
 
 def main():
@@ -145,7 +145,7 @@ def main():
     # -----------------------------------------------------------------------
 
     # Create UART object
-    uart5 = UART(5, 115200)
+    uart5 = UART(1, 115200)
 
     # Create Task Objects (since tasks are classes)    
     ui_task_obj = UITask(col_start, col_done, mtr_enable, stream_data, abort,
