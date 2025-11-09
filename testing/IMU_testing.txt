@@ -1,0 +1,39 @@
+from pyb import Pin, I2C
+
+# Initialize and configure pins for IMU
+sda = Pin('PB14', mode=Pin.ALT, alt=4)
+scl = Pin('PB13', mode=Pin.ALT, alt=4)
+reset = Pin('PB15', mode=Pin.OUT_PP)
+
+# Initialize I2C interface
+i2c = I2C(2, mode=I2C.CONTROLLER, baudrate=400000, timeout=100)
+
+# Set operation mode
+i2c.mem_write(0x0C, 0x28, 0x3D)
+
+# Read calibration status
+cal_stat = i2c.mem_read(8, 0x28, 0x35)
+
+# Read calibrations coefficients
+mag_stat = cal_stat[0] & 0b11
+acc_stat = (cal_stat[0] >> 2) & 0b11
+gyr_stat = (cal_stat[0] >> 2) & 0b11
+sys_stat = (cal_stat[0] >> 2) & 0b11
+
+# Code to put in PUTTY
+from pyb import Pin, I2C
+sda = Pin('PB14', mode=Pin.ALT, alt=4)
+scl = Pin('PB13', mode=Pin.ALT, alt=4)
+i2c = I2C(2, mode=I2C.CONTROLLER, baudrate=400000)
+i2c.scan()
+i2c.mem_write(0x0C, 0x28, 0x3D)
+cal_stat = i2c.mem_read(8, 0x28, 0x35)
+mag_stat = cal_stat[0] & 0b11
+acc_stat = (cal_stat[0] >> 2) & 0b11
+gyr_stat = (cal_stat[0] >> 2) & 0b11
+sys_stat = (cal_stat[0] >> 2) & 0b11
+mag_stat
+acc_stat
+gyr_stat
+sys_stat
+mag_stat

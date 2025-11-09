@@ -1,8 +1,0 @@
-from pyb import Pin, ADC, Timer
-import array
-tim = Timer(6, freq=20)
-ir_pin1 = Pin(Pin.cpu.C2, mode=Pin.IN)
-adc1 = ADC(ir_pin1)
-buf = array.array('H', [0] * 100)
-adc1.read_timed(buf, tim)
-print(buf)
