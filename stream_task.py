@@ -26,7 +26,7 @@ class StreamTask:
     def __init__(self,
                  eff, col_done, stream_data, uart5,
                  time_q, left_pos_q, right_pos_q, left_vel_q, right_vel_q,
-                 control_mode, setpoint, kp, ki):
+                 control_mode, setpoint, kp, ki, k_line, lf_target):
 
          # Serial interface (Bluetooth UART)
         self.ser = uart5
@@ -41,7 +41,9 @@ class StreamTask:
         self.setpoint = setpoint
         self.kp = kp
         self.ki = ki
-        
+        self.k_line = k_line
+        self.lf_target = lf_target
+
         # Queues
         self.time_q = time_q
         self.left_pos_q = left_pos_q
@@ -72,45 +74,58 @@ class StreamTask:
                 
             ### 2: STREAM DATA STATE -------------------------------------------
             elif (self.state == self.S2_STREAM_DATA):
-                # # Print header
-                # self.ser.write("time_ms,pos_L,pos_R,vel_L,vel_R\r\n".encode())
-                # yield self.state 
-                
-                # Get number of items in queue to determine size
+
+                # Get control mode info to send to PC
+                mode_val = int(self.control_mode.get())
+                if mode_val == 0:
+                    mode = "E"  # effort mode
+                    control_val = self.eff.get()
+                elif mode_val == 1:
+                    mode = "V"  # velocity mode
+                    control_val = self.setpoint.get()
+                else:
+                    mode = "L"  # line follow mode
+                    control_val = self.lf_target.get()
+
+                # Determine the number of samples actually in the queues
                 _size = self.time_q.num_in()
-                mode = "V" if self.control_mode.get() else "E"
-                control_val = self.setpoint.get() if self.control_mode.get() else self.eff.get()
-                
-                # Send header line with control mode and parameters
-                if self.control_mode.get():
-                    # Header line for velocity mode: mode,setpoint,kp,ki,size
+
+                # Send a line with the control mode and parameters
+                if mode == "E":
+                    line = f"{mode},{control_val},{_size}\r\n"
+                elif mode == "V":
                     line = f"{mode},{control_val},{self.kp.get():.2f},{self.ki.get():.2f},{_size}\r\n"
                 else:
-                    # Header line for effort mode: mode,effort,size
-                    line = f"{mode},{control_val},{_size}\r\n"
-                self.ser.write(line.encode())
+                    line = f"{mode},{control_val},{self.kp.get():.2f},{self.ki.get():.2f},{self.k_line.get():.2f},{_size}\r\n"
 
-                yield self.state
+                self.ser.write(line.encode()) # write the line over Bluetooth
+                yield self.state # write only one line then yield
 
                 # while we still have items in queue
+                index = 0 # sample index number (sent to PC for alignment)
                 while self.time_q.any():
-                    # Get items from the queue
+                    # Get items from the queues
                     t = self.time_q.get()
                     pL = self.left_pos_q.get()
                     pR = self.right_pos_q.get()
                     vL = self.left_vel_q.get()
                     vR = self.right_vel_q.get()
-                    line = f"{t},{pL},{pR},{vL},{vR}\r\n"
-                    self.ser.write(line.encode())
+                    # Put it all into a CSV-style line stamped with the index
+                    data = f"{index},{t},{pL},{pR},{vL},{vR}\r\n"
+                    # Send the line over Bluetooth
+                    self.ser.write(data.encode())
+                    # Increment the sample index
+                    index += 1
+                    # Only write one line then yield
                     yield self.state
 
-                else:
-                    # Tell PC streaming is done
-                    # self.ser.write(b'r')
-                    self.stream_data.put(0)
-                    self.col_done.put(0) # reset done flag for next test
+                # Once all samples have been sent, mark the end of the stream
+                self.ser.write(b"#END\r\n") # explicit end marker for PC
+                # Reset flags
+                self.stream_data.put(0)
+                self.col_done.put(0) # reset done flag for next test
 
-                    gc.collect() # run garbage collector
-                    self.state = self.S1_WAIT_FOR_TRIGGER # set next state
+                gc.collect() # run garbage collector
+                self.state = self.S1_WAIT_FOR_TRIGGER # go back to wait state
 
             yield self.state

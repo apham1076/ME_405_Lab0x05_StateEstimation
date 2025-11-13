@@ -99,44 +99,55 @@ def main():
     # -----------------------------------------------------------------------
     ### Shared Variables: create shares and queues (inter-task communication)
     # ----------------------------------------------------------------------
-    # Data Shares...
+    # --- Data Shares...
     time_sh = task_share.Share('H', name='Time share')
     left_pos_sh = task_share.Share('f', name= 'Left motor position share')
     right_pos_sh = task_share.Share('f', name= 'Right motor position share')
     left_vel_sh = task_share.Share('f', name= 'Left motor velocity share')
     right_vel_sh = task_share.Share('f', name= 'Right motor velocity share')
-    
-    # Motor control shares...
+
+    # --- Motor control shares...
     eff = task_share.Share('f', name='Requested Effort')  # float effort percent
     setpoint = task_share.Share('h', name='Velocity Setpoint')  # 'h' for signed 16-bit to handle larger velocity values
     kp = task_share.Share('f', name='Proportional Gain')  # 'f' for float to store Kp
     ki = task_share.Share('f', name='Integral Gain')  # 'f' for float to store Ki
-    # Initialize motor control shares
+    # --- Initialize motor control shares
     eff.put(0)  # Start with zero effort
     setpoint.put(0)  # Start with zero setpoint
     kp.put(0)  # Start with zero gains
     ki.put(0)
-    # Driving mode and control mode shares...
-    driving_mode = task_share.Share('B', name='Driving Mode')  # straight line, pivot, or arc
-    control_mode = task_share.Share('B', name='Control Mode')  # 0: effort mode, 1: velocity mode
-    # Initialize driving and control mode shares
-    driving_mode.put(1)  # Start in straight line mode
-    control_mode.put(0)  # Start in effort mode
-    # Line following shares...
-    left_sp_sh = task_share.Share('f', name='LF Left Setpoint'); left_sp_sh.put(0.0)
-    right_sp_sh = task_share.Share('f', name='LF Right Setpoint'); right_sp_sh.put(0.0)
-    ir_cmd = task_share.Share('B', name='IR Calibrate Cmd'); ir_cmd.put(0)
-    k_line = task_share.Share('f', name='LineFollow K_line'); k_line.put(0.0)
-    lf_target = task_share.Share('f', name='LineFollow Target'); lf_target.put(0.0)
 
-    # Boolean flags
+    # --- Driving mode and control mode shares...
+    driving_mode = task_share.Share('B', name='Driving Mode')
+    # 1: straight line, 2: pivot, 3: arc
+    # Driving mode only affects effort and velocity modes, not line follow mode
+    control_mode = task_share.Share('B', name='Control Mode')
+    # 0: effort mode, 1: velocity mode, 2: line follow mode
+    # --- Initialize driving and control mode shares
+    control_mode.put(0)  # Start in effort mode
+    driving_mode.put(1)  # Start in straight line mode
+
+    # ---Line following shares...
+    left_sp_sh = task_share.Share('f', name='LF Left Setpoint')
+    right_sp_sh = task_share.Share('f', name='LF Right Setpoint')
+    ir_cmd = task_share.Share('B', name='IR Calibrate Cmd')
+    k_line = task_share.Share('f', name='LineFollow K_line')
+    lf_target = task_share.Share('f', name='LineFollow Target')
+    # --- Initialize line following shares
+    left_sp_sh.put(0.0)
+    right_sp_sh.put(0.0)
+    ir_cmd.put(0)
+    k_line.put(0.0)
+    lf_target.put(0.0)
+
+    # --- Boolean flags (shares)...
     col_start = task_share.Share('B', name='Start Collection Flag')
     col_done = task_share.Share('B', name='Collection Done Flag')
     mtr_enable = task_share.Share('B', name='Motor Enable Flag')
     stream_data = task_share.Share('B', name='Stream Data Flag')
     abort = task_share.Share('B', name='Abort Flag')
 
-    # Data Queues...
+    # --- Data Queues...
     time_q = task_share.Queue('H', size=MAX_SAMPLES, name='Time share')
     left_pos_q = task_share.Queue('f', size=MAX_SAMPLES, name= 'Left motor position share')
     right_pos_q = task_share.Queue('f', size=MAX_SAMPLES, name= 'Right motor position share')
@@ -169,7 +180,7 @@ def main():
 
     stream_task_obj = StreamTask(eff, col_done, stream_data, uart,
                                  time_q, left_pos_q, right_pos_q, left_vel_q, right_vel_q,
-                                 control_mode, setpoint, kp, ki)
+                                 control_mode, setpoint, kp, ki, k_line, lf_target)
 
     steering_task_obj = SteeringTask(ir_array, battery,
                                  control_mode, ir_cmd,

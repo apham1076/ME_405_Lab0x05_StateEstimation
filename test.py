@@ -214,6 +214,17 @@ def auto_run_sequence(efforts):
                     ki = float(parts[3])
                     _size = int(parts[4])
                     params = {'kp': kp, 'ki': ki}
+                elif parts[0] in ('L', 'l'):
+                    # Line follow mode header: L,target,kp,ki,k_line,size
+                    if len(parts) < 6:
+                        raise ValueError("not enough fields for line follow header")
+                    _mode_str = parts[0]
+                    _control_val = float(parts[1])
+                    kp = float(parts[2])
+                    ki = float(parts[3])
+                    k_line = float(parts[4])
+                    _size = int(parts[5])
+                    params = {'kp': kp, 'ki': ki, 'k_line': k_line}
                 else:
                     raise ValueError("unknown mode in header")
             except Exception as e:
@@ -228,29 +239,54 @@ def auto_run_sequence(efforts):
             runs[run_name]['mode'] = _mode_str
             # Provide informative print depending on mode
             if _mode_str in ('E', 'e'):
-                print(f"Created {run_name} (eff={_control_val}, size={_size})")
-            else:
+                print(f"Created {run_name} (E) eff={_control_val}, size={_size}")
+            elif _mode_str in ('V', 'v'):
                 print(f"Created {run_name} (V) sp={_control_val} Kp={kp:.2f} Ki={ki:.2f} size={_size}")
+            elif _mode_str in ('L', 'l'):
+                print(f"Created {run_name} (L) target={_control_val} Kp={kp:.2f} Ki={ki:.2f} K_line={k_line:.2f} size={_size}")
 
-            line_num = 0
-            while line_num <= _size - 10:
+
+            last_idx = -1
+            recv_line_num = 0 # counts how many lines were received, regardless of idx
+            while True:
                 line = ser.readline().decode().strip()
                 if not line:
                     continue
-                try:
-                    time_s, left_pos, right_pos, left_vel, right_vel = line.split(',')
-                    runs[run_name]["motor_data"].loc[line_num, "_time"] = float(time_s)
-                    runs[run_name]["motor_data"].loc[line_num, "_left_pos"] = float(left_pos)
-                    runs[run_name]["motor_data"].loc[line_num, "_right_pos"] = float(right_pos)
-                    runs[run_name]["motor_data"].loc[line_num, "_left_vel"] = float(left_vel)
-                    runs[run_name]["motor_data"].loc[line_num, "_right_vel"] = float(right_vel)
-                    line_num += 1
-                except ValueError:
-                    print(f"Line {line_num} rejected. Contents: {line}")
-                    line_num += 1
 
-            print(f"Finished streaming for {run_name}")
-            
+                # Check for end of stream marker
+                if line.startswith("#END"):
+                    print("Received end of stream marker from Romi.")
+                    break
+
+                try:
+                    # Try to split and parse fields
+                    idx_str, time_s, left_pos, right_pos, left_vel, right_vel = line.split(',')
+                    idx = int(idx_str)
+                except ValueError:
+                    print(f"[Rejected] Received line #{recv_line_num}: could not parse the index. Raw: '{line}'")
+                    recv_line_num += 1
+                    continue
+
+                # Try to convert valid numeric data
+                try:
+                    runs[run_name]["motor_data"].loc[idx, "_time"] = float(time_s)
+                    runs[run_name]["motor_data"].loc[idx, "_left_pos"] = float(left_pos)
+                    runs[run_name]["motor_data"].loc[idx, "_right_pos"] = float(right_pos)
+                    runs[run_name]["motor_data"].loc[idx, "_left_vel"] = float(left_vel)
+                    runs[run_name]["motor_data"].loc[idx, "_right_vel"] = float(right_vel)
+                except ValueError:
+                    print(f"[Rejected] Line #{recv_line_num}: numeric conversion failed. Raw: '{line}'")
+                    recv_line_num += 1
+                    continue
+
+                last_idx = idx
+                recv_line_num += 1
+
+                # Stop if we've received all expected samples
+                if last_idx >= (_size - 1):
+                    print(f"All { _size } samples received for {run_name}.")
+                    break
+
             if run_count == 10:
                 print(f"Automated test is finished ({run_count} runs completed). Hit 'x' to plot data.")
 
@@ -271,7 +307,6 @@ def auto_run_sequence(efforts):
                     print("Serial port closed.")
         finally:
             return
-
 
 # Function to run an automated closed-loop test
 def run_closed_loop_test():
@@ -687,61 +722,85 @@ while True:
                 elif streaming:
                     # print("ve r streeming")
                     if first:
-                        # Read and parse header line
-                        header = ser.readline().decode().strip().split(",")
-                        mode = header[0]  # 'E' for effort, 'V' for velocity
-                        
-                        if mode == 'E':
-                            control_val = float(header[1])  # effort value
-                            size = int(header[2])
-                            params = None
-                        else:  # Velocity mode
-                            control_val = float(header[1])  # setpoint value
-                            kp = float(header[2])
-                            ki = float(header[3])
-                            size = int(header[4])
-                            params = {'kp': kp, 'ki': ki}
-                        
+                        # Read and parse header line (mode, control, params, size)
+                        header_line = ser.readline().decode().strip()
+                        if not header_line:
+                            continue
+                        parts = header_line.split(',')
+                        hdr_mode = parts[0].upper() if parts else 'E'  # 'E' for effort, 'V' for velocity, 'L' for line follow
+
+                        try:
+                            if hdr_mode == 'E':
+                                control_val = float(parts[1])  # effort value
+                                size = int(parts[2])
+                                params = None
+                            elif hdr_mode == 'V':  # Velocity mode
+                                control_val = float(parts[1])  # setpoint value
+                                kp = float(parts[2])
+                                ki = float(parts[3])
+                                size = int(parts[4])
+                                params = {'kp': kp, 'ki': ki}
+                            elif hdr_mode == 'L':  # Line follow mode
+                                control_val = float(parts[1])  # target value
+                                kp = float(parts[2])
+                                ki = float(parts[3])
+                                k_line = float(parts[4])
+                                size = int(parts[5])
+                                params = {'kp': kp, 'ki': ki, 'k_line': k_line}
+                            else:
+                                print(f"Unknown header mode: '{header_line}'")
+                                continue
+                        except Exception as e:
+                            print(f"Failed to parse header '{header_line}': {e}")
+                            continue
+
                         # Create new run
                         run_count += 1
                         run_name = f'run{run_count}'
                         runs[run_name] = create_run(control_val, size)
                         if params:
                             runs[run_name]['params'] = params
-                        runs[run_name]['mode'] = mode
-                        print(f"Run {run_name} created in {mode} mode")
-                        # print(size)
-                        line_num = 0
+                        runs[run_name]['mode'] = hdr_mode
+                        print(f"Run {run_name} created in {hdr_mode} mode (size={size})")
+
+                        recv_line_num = 0
                         first = False
-                    # elif done:
-                    #     first = True
-                    #     streaming = False
-                    #     done = False
+                    
                     else:
-                        if line_num <= size - 5:
-                            # Read line by line
-                            try:
-                                spam = ser.readline().decode().strip().split(",")
-                                time, left_pos, right_pos, left_vel, right_vel = spam
+                        line = ser.readline().decode().strip()
+                        if not line:
+                            continue
 
-                                runs[run_name]["motor_data"].loc[line_num,"_time"] = float(time)
-                                # runs[run_name]["motor_data"].loc[line_num,"_control"] = float(control)
-                                runs[run_name]["motor_data"].loc[line_num, "_left_pos"] = float(left_pos)
-                                runs[run_name]["motor_data"].loc[line_num, "_right_pos"] = float(right_pos)
-                                runs[run_name]["motor_data"].loc[line_num, "_left_vel"] = float(left_vel)
-                                runs[run_name]["motor_data"].loc[line_num, "_right_vel"] = float(right_vel)
-                                line_num += 1
-                                # print(line_num)
-                            except ValueError:
-                                print(f"Line {line_num} rejected. Contents: {spam}")
-                                line_num +=1
-
-                        else:
-                            print("Data streaming complete. Hit 'd' to print data.")
+                        if line.startswith("#END"):
+                            print("Received end of stream marker from Romi. Hit 'd' to print data.")
                             first = True
                             streaming = False
                             sleep(0.5)
                             print(user_prompt)
+                            continue
+
+                        # Read line by line
+                        try:
+                            idx_str, time_s, left_pos, right_pos, left_vel, right_vel = line.split(',')
+                            idx = int(idx_str)
+                        except ValueError:
+                            print(f"[Rejected] Received line #{recv_line_num}: could not parse the index. Raw: '{line}'")
+                            recv_line_num += 1
+                            continue
+
+                        try:
+                            runs[run_name]["motor_data"].loc[idx,"_time"] = float(time_s)
+                            runs[run_name]["motor_data"].loc[idx, "_left_pos"] = float(left_pos)
+                            runs[run_name]["motor_data"].loc[idx, "_right_pos"] = float(right_pos)
+                            runs[run_name]["motor_data"].loc[idx, "_left_vel"] = float(left_vel)
+                            runs[run_name]["motor_data"].loc[idx, "_right_vel"] = float(right_vel)
+                        except ValueError:
+                            print(f"[Rejected] Line #{recv_line_num}: numeric conversion failed. Raw: '{line}'")
+                            recv_line_num += 1
+                            continue
+                        
+                        recv_line_num += 1
+
                 else:
                     pass
             else:
