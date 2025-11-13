@@ -105,9 +105,9 @@ class UITask:
             elif (self.state == self.S1_WAIT_FOR_COMMAND):
                 
                 # First check if the last test finished
-                if self.col_done.get():
-                    self.ser.write(b'q')
-                    self.col_done.put(0)
+                # if self.col_done.get():
+                #     self.ser.write(b'q')
+                #     self.col_done.put(0)
 
                 # Wait for user input
                 if self.ser.any():
@@ -308,22 +308,21 @@ class UITask:
                         self.col_start.put(0)  # Stop data collection
                         self.ser.write(b'q')  # Tell PC test is done
                         self.state = self.S1_WAIT_FOR_COMMAND
+                        yield self.state
 
                         # Clear any other junk that might be in the buffer
                         while self.ser.any():
                             self.ser.read(1)
 
                 # Then, check for normal completion if no kill command
-                elif not self.mtr_enable.get() or not self.col_start.get():
+                elif not self.mtr_enable.get() or not self.col_start.get() or self.col_done.get():
                     # Tell PC test is testing is done
                     self.ser.write(b'q')
-                    self.state = self.S1_WAIT_FOR_COMMAND
-
-                elif self.col_done.get():
-                    # Tell PC test is testing is done
-                    self.ser.write(b'q')
+                    # print("Test completed")
+                    self.abort.put(1)
                     self.mtr_enable.put(0)
                     self.col_start.put(0)
+                    self.col_done.put(0)
                     self.state = self.S1_WAIT_FOR_COMMAND
-            
+
             yield self.state

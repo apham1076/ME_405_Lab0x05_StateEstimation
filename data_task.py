@@ -101,9 +101,9 @@ class DataCollectionTask:
                 
                 else:
                     # Set flags
-                    self.col_start.put(0)
+                    # self.col_start.put(0)
                     self.col_done.put(1)
-                    self.mtr_enable.put(0)
+                    # self.mtr_enable.put(0)
                     self.state = self.S3_COLLECTION_DONE
             
             ### 3: DONE STATE --------------------------------------------------
