@@ -1,7 +1,7 @@
 # main.py
 
 # ==============================================================================
-# ME 405 Lab 0x04 - Line Following
+# ME 405 Lab 0x05 - State Estimation
 # ------------------------------------------------------------------------------
 # Each task runs cooperatively under Dr. JR Ridgley's cotask scheduler.
 # Communication between tasks happens exclusively via task_share objects
@@ -24,6 +24,7 @@
 #   SteeringTask: reads IR sensor array, computes steering correction, and
 #   sends commands to motor control task.
 #
+#   StateEstimationTask: predicts the future state of the system using a system #    #   model and sensor inputs.
 # ==============================================================================
 
 ### TO-DO:
