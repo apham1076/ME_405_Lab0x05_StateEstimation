@@ -153,6 +153,10 @@ def main():
     right_pos_q = task_share.Queue('f', size=MAX_SAMPLES, name= 'Right motor position share')
     left_vel_q = task_share.Queue('f', size=MAX_SAMPLES, name= 'Left motor velocity share')
     right_vel_q = task_share.Queue('f', size=MAX_SAMPLES, name= 'Right motor velocity share')
+
+    # --- Data streaming shares...
+    ack_end = task_share.Share('B', name='ACK End of Stream Flag')
+
     # -----------------------------------------------------------------------
 
     # Create UART object
@@ -164,7 +168,7 @@ def main():
                          uart, battery,
                          time_q, left_pos_q, right_pos_q, left_vel_q, right_vel_q,
                          ir_cmd,
-                         k_line, lf_target)
+                         k_line, lf_target, ack_end)
 
     motor_task_obj = MotorControlTask(left_motor, right_motor,
                                       left_encoder, right_encoder,

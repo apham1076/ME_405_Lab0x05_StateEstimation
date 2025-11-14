@@ -34,7 +34,8 @@ class UITask:
                  uart5, battery,
                  time_q, left_pos_q, right_pos_q, left_vel_q, right_vel_q,
                  ir_cmd,
-                 k_line, lf_target):
+                 k_line, lf_target,
+                 ack_end=None):
         
         # Flags
         self.col_start = col_start
@@ -71,6 +72,9 @@ class UITask:
         # ensure FSM starts in state S0_INIT
         self.state = self.S0_INIT
 
+        # Optional share for ACK_END from PC (stream end acknowledgement)
+        self.ack_end = ack_end
+
 
         # self.char_dict = {"0": 0,
         #                 "1": 10,
@@ -98,58 +102,119 @@ class UITask:
                 self.last_eff = 0
                 self.abort.put(0)
                 self.driving_mode.put(1) # default to straight line mode
+                self.ack_end.put(0)
                 
                 self.state = self.S1_WAIT_FOR_COMMAND
 
             ### 1: WAITING STATE -----------------------------------------------
             elif (self.state == self.S1_WAIT_FOR_COMMAND):
-                
-                # First check if the last test finished
-                # if self.col_done.get():
-                #     self.ser.write(b'q')
-                #     self.col_done.put(0)
 
-                # Wait for user input
+                # Wait for user input (read available bytes non-blocking)
                 if self.ser.any():
-                    ch = self.ser.read(1).decode().lower() # read 1 char AAT
-                    self.cmd_buf = ch
-                    # Romi will send, PC's turn to receive
-                    # self.ser.write(b's')
+                    try:
+                        raw = self.ser.read(self.ser.any())
+                        text = raw.decode()
+                    except Exception:
+                        # Fallback to single-char read
+                        try:
+                            text = self.ser.read(1).decode()
+                        except Exception:
+                            text = ''
 
-                    self.state = self.S2_PROCESS_COMMAND # set next state
+                    if not text:
+                        continue
+
+                    # Normalize and handle multi-byte messages like ACK_END
+                    lower = text.lower()
+                    if 'ack_end' in lower and self.ack_end:
+                        try:
+                            self.ack_end.put(1)
+                        except Exception:
+                            pass
+                        # remove ack_end token from text
+                        lower = lower.replace('ack_end', '')
+                        text = ''
+
+                    # Find first non-whitespace character to use as single-char command
+                    first_char = None
+                    for c in lower:
+                        if not c.isspace():
+                            first_char = c
+                            break
+                    if first_char:
+                        self.cmd_buf = first_char
+                        # Romi will send, PC's turn to receive
+                        # self.ser.write(b's')
+                        self.state = self.S2_PROCESS_COMMAND # set next state
+                    else:
+                        # No command found; remain waiting
+                        pass
             
             ### 2: PROCESS COMMAND STATE ---------------------------------------
             elif self.state == self.S2_PROCESS_COMMAND:
                 cmd = self.cmd_buf
-                # Velocity setpoint message: 'y' + 4 digits for >= 0, or 'z' + 4 digits for < 0
-                if cmd in ['y', 'z'] and self.ser.any() >= 4:
-                    # Read the 4 digits for setpoint value
-                    value_str = self.ser.read(4).decode()
-                    try:
-                        value = int(value_str)
-                        if cmd == 'z':
-                            value = -value
-                        if self.mtr_enable.get():
-                            pass  # Cannot change setpoint mid-test
-                        else:
-                            self.setpoint.put(value)
-                            print("Setpoint value set to:", value)
-                    except ValueError:
-                        pass  # Invalid setpoint format
-                
-                # Digits or 'a' set the effort (open-loop control)
-                elif cmd.isdigit() or cmd == 'a':
-                    val = 10 * (int(cmd) if cmd.isdigit() else 10)  # 0-9 → 0–90%, a→100%
-                    if self.mtr_enable.get():
-                        pass
-                        # Cannot change effort mid-test
-                    else:
+
+                if cmd == 'e' and self.ser.any() >= 1:
+                    # Effort command: 'e' + 2 digits (00 to 99) or 'e' + 'a' for 100%
+                    value_str = self.ser.read(1).decode()
+
+                    if value_str.isdigit() or value_str == 'a':
+                        val = 10 * (int(value_str) if value_str.isdigit() else 10)  # '00'-'99' → 0–99%, 'a'→100%
                         self.last_eff = val
                         self.eff.put(val)
-                        # Ready to go
+                        self.control_mode.put(0)  # switch to effort control mode
+                        print("Effort value set to:", val)
+                    else:
+                        print("Invalid effort command format")
+
+                if cmd == 'v' and self.ser.any() >= 12:
+                    # Velocity command: 'v' + 4 digits for setpoint + 4 digits for Kp + 4 digits for Ki
+                    value_str = self.ser.read(12).decode()
+                    try:
+                        sp_str = value_str[0:4]
+                        kp_str = value_str[4:8]
+                        ki_str = value_str[8:12]
+                        setpoint = int(sp_str)
+                        kp_int = int(kp_str)
+                        ki_int = int(ki_str)
+                        kp = kp_int / 100.0
+                        ki = ki_int / 100.0
+                        self.setpoint.put(setpoint)
+                        self.kp.put(kp)
+                        self.ki.put(ki)
+                        self.control_mode.put(1)  # switch to velocity control mode
+                        print("Velocity control params set: Setpoint =", setpoint, "Kp =", kp, "Ki =", ki)
+                    except ValueError:
+                        print("Invalid velocity command format")
+
+                if cmd == 'l' and self.ser.any() >= 16:
+                    # Line-following command: 'l' + 4 digits for Kp + 4 digits for Ki + 4 digits for K_line + 4 digits for target velocity
+                    value_str = self.ser.read(16).decode()
+                    try:
+                        kp_str = value_str[0:4]
+                        ki_str = value_str[4:8]
+                        kline_str = value_str[8:12]
+                        target_str = value_str[12:16]
+                        kp_int = int(kp_str)
+                        ki_int = int(ki_str)
+                        k_line_int = int(kline_str)
+                        v_target_int = int(target_str)
+                        kp = kp_int / 100.0
+                        ki = ki_int / 100.0
+                        k_line = k_line_int / 100.0
+                        v_target = v_target_int / 100.0
+                        self.kp.put(kp)
+                        self.ki.put(ki)
+                        self.k_line.put(k_line)
+                        self.lf_target.put(v_target)
+                        self.control_mode.put(2)  # switch to line-following control mode
+                        print("Line-following params set: Kp =", kp, "Ki =", ki, "K_line =", k_line, "Target Velocity =", v_target)
+                    except ValueError:
+                        print("Invalid line-following command format")
+                    
 
                 # 'r' → Run test
-                elif cmd == 'r':
+                if cmd == 'r':
                     if not self.mtr_enable.get():
                         print("Starting run")
                         self.abort.put(0)
@@ -171,32 +236,6 @@ class UITask:
                             # remain in WAIT state, don't auto-stop
                             print("Line-follow mode active; running indefinitely.")
 
-                # 'p' → Set Kp (when followed by 4 digits)
-                elif cmd == 'p' and self.ser.any() >= 4:
-                    # Read the 4 digits for Kp value
-                    value_str = self.ser.read(4).decode()
-                    try:
-                        kp_int = int(value_str)
-                        kp = kp_int / 100.0  # Scale back down from integer
-                        if not self.mtr_enable.get():
-                            self.kp.put(kp)
-                        print("Kp received:", kp)
-                    except ValueError:
-                        pass  # Invalid Kp format
-
-                # 't' → Set target/setpoint (when followed by 4 digits)
-                elif cmd == 't' and self.ser.any() >= 4:
-                    # Read the 4 digits for setpoint value
-                    value_str = self.ser.read(4).decode()
-                    try:
-                        setpoint = int(value_str)
-                        print("Setpoint received:")
-                        print(setpoint)
-                        if not self.mtr_enable.get():
-                            self.setpoint.put(setpoint)
-                    except ValueError:
-                        pass  # Invalid setpoint format
-
                 # 'k' → KILL (STOP)
                 elif cmd == 'k':
                     print("Stopping test")
@@ -205,37 +244,9 @@ class UITask:
                     self.col_start.put(0)  # Stop data collection
                     self.ser.write(b'q')  # Tell PC test is done
 
-                # 'i' → Set Ki (when followed by 4 digits)
-                elif cmd == 'i' and self.ser.any() >= 4:
-                    # Read the 4 digits for Ki value
-                    value_str = self.ser.read(4).decode()
-                    try:
-                        ki_int = int(value_str)
-                        ki = ki_int / 100.0  # Scale back down from integer
-                        if not self.mtr_enable.get():
-                            self.ki.put(ki)
-                        print("Ki received:", ki)
-                    except ValueError:
-                        pass  # Invalid Ki format
-
-                # 'm' → Toggle control mode
-                elif cmd == 'm':
-                    if not self.mtr_enable.get():  # Only allow mode change when motors are off
-                        current_mode = self.control_mode.get()
-                        new_mode = (current_mode + 1) % 3  # Cycle through 0, 1, 2
-                        self.control_mode.put(new_mode)
-                        print("Switching control mode to:", "Velocity" if new_mode == 1 else "Effort" if new_mode == 0 else "Line Following")
-
-                
                 # 's' → STREAM
                 elif cmd == 's':
                     self.stream_data.put(1)
-
-                    # if self.mtr_enable.get() or self.col_start.get():
-                    #     pass
-                    #     # Cannot send data while test is running
-                    # else:
-                    #     self.stream_data.put(1)
 
                 # 'n' → TOGGLE MODE
                 elif cmd == 'n':
@@ -256,7 +267,7 @@ class UITask:
                         self.driving_mode.put(new_mode)
                 
                 # 'v' → print current battery voltage
-                elif cmd == 'v':
+                elif cmd == 'V':
                     v_batt = self.battery.read_voltage()
                     voltage_msg = f"{v_batt:.2f}\n"
                     self.ser.write(voltage_msg.encode()) # send over bluetooth UART
@@ -267,29 +278,6 @@ class UITask:
                 elif cmd == 'b':   # Calibrate on BLACK line
                     if self.ir_cmd: self.ir_cmd.put(2)
 
-                elif cmd == 'l' and self.ser.any() >= 16:
-                    # Set gains for line-following
-                    try:
-                        # Read 4 digits for Kp and 4 digits for Ki and 4 digits for setpoint
-                        kp_str = self.ser.read(4).decode()
-                        ki_str = self.ser.read(4).decode()
-                        kline_str = self.ser.read(4).decode()
-                        target_str = self.ser.read(4).decode()
-                        kp = int(kp_str) / 100.0
-                        ki = int(ki_str) / 100.0
-                        k_line = int(kline_str) / 100.0
-                        v_target = int(target_str) / 100.0
-
-                        self.kp.put(kp)
-                        self.ki.put(ki)
-                        self.k_line.put(k_line)
-                        self.lf_target.put(v_target)
-                        self.control_mode.put(2)  # switch to line-following mode
-                        print(f"Line-following params set: Kp={kp}, Ki={ki}, K_line={k_line}, Target={v_target} (Mode=Line-Follow)")
-                    except ValueError:
-                        print("Invalid line-follow parameter format")
-
-                # Anything else → ignore, Shouldn't need to worry about other commmands handled by PC
                 else:
                     pass
 
@@ -300,19 +288,41 @@ class UITask:
             elif self.state == self.S3_MONITOR_TEST:
                 # Check for abort signal first
                 if self.ser.any():
-                    ch = self.ser.read(1).decode().lower() # read 1 char AAT
-                    if ch == 'k':
-                        print("Stopping test")
-                        self.abort.put(1)  # Set abort flag first
-                        self.mtr_enable.put(0)  # Then disable motors
-                        self.col_start.put(0)  # Stop data collection
-                        self.ser.write(b'q')  # Tell PC test is done
-                        self.state = self.S1_WAIT_FOR_COMMAND
-                        yield self.state
+                    try:
+                        raw = self.ser.read(self.ser.any())
+                        text = raw.decode()
+                    except Exception:
+                        try:
+                            text = self.ser.read(1).decode()
+                        except Exception:
+                            text = ''
 
-                        # Clear any other junk that might be in the buffer
-                        while self.ser.any():
-                            self.ser.read(1)
+                    if not text:
+                        pass
+                    else:
+                        lower = text.lower()
+                        # Handle ACK_END from PC (stream end acknowledgement)
+                        if 'ack_end' in lower and self.ack_end:
+                            try:
+                                self.ack_end.put(1)
+                            except Exception:
+                                pass
+                            # remove ack token for further processing
+                            lower = lower.replace('ack_end', '')
+
+                        # If a 'k' kill command is present, honor it
+                        if 'k' in lower:
+                            print("Stopping test")
+                            self.abort.put(1)  # Set abort flag first
+                            self.mtr_enable.put(0)  # Then disable motors
+                            self.col_start.put(0)  # Stop data collection
+                            self.ser.write(b'q')  # Tell PC test is done
+                            self.state = self.S1_WAIT_FOR_COMMAND
+                            yield self.state
+
+                            # Clear any other junk that might be in the buffer
+                            while self.ser.any():
+                                self.ser.read(1)
 
                 # Then, check for normal completion if no kill command
                 elif not self.mtr_enable.get() or not self.col_start.get() or self.col_done.get():

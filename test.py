@@ -1,12 +1,10 @@
 # Script to run on PC to run motor characterization test and perform data collection
 
-# Last modified: 10-30-25 11:00am
+# Last modified: 11-13-25 7:30 PM
 
 # # ************* NOTES **************
 
 # ************* TO-DO **************
-# Debug driving mode
-# Plot data for several runs
 # Figure out why data is so jaggedy (message Charlie on Piazza)
 # Debug data streaming: use START and ACK
 
@@ -18,24 +16,29 @@ import msvcrt
 import pandas as pd
 import numpy as np
 import os
+import queue as local_queue
+import time
 
 key = ''                    # Stores value of key pressed as a string
 running = False             # Set when motor testing is progress
 streaming = False           # Set when data streaming is in progress
 runs = {}                   # Dict to contain runs
 run_count = 0               # Number of runs
-override = False            # Set if user wants to overwrite existing run
-_continue = False           # Second option, if user doesn't want to overwrite
-question = False            # Set when option to override is presented
 control_mode = 0            # 0 = effort mode, 1 = velocity mode, 2 = line follow mode
-current_setpoint = 0        # Current velocity setpoint in rad/s
+effort = 0                 # Current effort value
+setpoint = 0               # Current velocity setpoint in rad/s
+kp = 0.0                    # Current proportional gain
+ki = 0.0                    # Current integral gain
+k_line = 0.0                # Current line following gain
 first = True
 done = False
 # mode = 1                    # 1, 2, 3 = straight, pivot, arc
 effort = 0                   # Current effort value
-stack = []                  # Stack of tests to run
+my_queue = local_queue.Queue()           # Queue to hold tests
 
-user_prompt = '''\r\nCommand keys:
+control_mode_dict = {0: "Effort", 1: "Velocity", 2: "Line Following"}
+
+old_user_prompt = '''\r\nCommand keys:
     m      : Toggle mode: Effort, Velocity, and Line Following
     0-9,a  : Set effort (0-100%) for open-loop control [Effort mode]
     t      : Set setpoint (rad/s) for closed-loop control [Velocity mode]
@@ -56,27 +59,40 @@ user_prompt = '''\r\nCommand keys:
     h      : Help / show this menu
     ctrl-c : Interrupt this program\r\n'''
 
-new_user_prompt = '''\r\nCommand keys:
+user_prompt = '''\r\nCommand keys:
     t      : Select a test to run: Effort, Velocity, Line Following
-    u      : Automate test sequence using stack
+    u      : Queue tests
     r      : Run test
     k      : Kill (stop) motors
     s      : Stream data
     d      : Save data from latest run to CSV and plot PNG
-    v      : Query battery voltage (prints to this terminal)
+    b      : Check battery voltage (prints to this terminal)
     c      : Calibrate sensors: IR sensors or IMU
     h      : Help / show this menu
+    ctrl-c : Interrupt this program\r\n
 '''
 
-control_mode_dict = {0: "Effort", 1: "Velocity", 2: "Line Following"}
+# # ************* HELPER FUNCTIONS **************
 
-# Function to calibrate IR sensors
-def calibrate_ir_sensors():
-    # Placeholder for IR sensor calibration logic
-    pass
+# Map an effort percentage (0-100) to the single-character key
+def eff_to_key(eff):
+    if eff == 100:
+        return 'a'
+    # assume efforts are multiples of 10
+    digit = int(eff // 10)
+    return str(digit)
+
+# Map a single-character key to an effort percentage (0-100)
+def key_to_eff(key):
+    if key == 'a':
+        return 100
+    if key.isdigit():
+        digit = int(key)
+        return digit * 10
+    return None
 
 # Function to create dictionary for storing data from one run
-def create_run(control_val, size):
+def create_run(control_val, run_num, size):
     time = np.zeros(size)
     p1 = np.zeros(size)
     p2 = np.zeros(size)
@@ -93,16 +109,9 @@ def create_run(control_val, size):
         "_right_vel": v2
     })
 
-    return {"control_val": control_val, "size": size, "motor_data": df}
+    return {"control_val": control_val, "run_num": run_num, "size": size, "motor_data": df}
 
-# Function to check if run has been created for a particular effort value
-def has_eff(runs, eff_value):
-    for run in runs.values():
-        if run["eff"] == eff_value:
-            return True    
-    return False
-
-
+# Function to clean DataFrame by removing all-zero rows except leading zeros
 def clean_data(df, cols=None, mode='all'):
     """
     Clean DataFrame by removing all zero rows except initial zeros up to the first non-zero data.
@@ -163,249 +172,9 @@ def clean_data(df, cols=None, mode='all'):
     return cleaned, removed
 
 
-# Map an effort percentage (0-100) to the single-character key expected by the Romi
-def eff_to_key(eff):
-    if eff == 100:
-        return 'a'
-    # assume efforts are multiples of 10
-    digit = int(eff // 10)
-    return str(digit)
+# # ************* MAIN PROGRAM **************
 
-def key_to_eff(key):
-    if key == 'a':
-        return 100
-    if key.isdigit():
-        digit = int(key)
-        return digit * 10
-    return None
-
-# Automated run sequence: for each effort in 'efforts' send the effort key and 'g' to start
-# then wait for the Romi to send a 'q' (test done), request streaming ('s'), and collect the
-# streamed data into the global `runs` dict (same format as interactive streaming).
-def auto_run_sequence(efforts):
-    global ser, runs, run_count
-
-    try:
-        for eff in efforts:
-            key = eff_to_key(eff)
-            print(f"Starting automated test for {eff}% (key='{key}')")
-            # set effort
-            # clear any stale input, then write the key. For 100% ('a') give the Romi more time to process.
-            try:
-                # pyserial method to clear input buffer
-                ser.reset_input_buffer()
-            except Exception:
-                pass
-            ser.write(key.encode())
-            # start test
-            ser.write(b'g')
-            print("Test started, waiting for completion signal from Romi...")
-
-            # wait for 'q' from Romi that indicates the test is done
-            while True:
-                if ser.in_waiting:
-                    ch = ser.read().decode(errors='ignore')
-                    if ch == 'q':
-                        print("Test complete signal received")
-                        break
-                else:
-                    sleep(0.05)
-
-            # request streaming
-            ser.write(b's')
-            sleep(0.1)
-
-            # Read header line and parse flexibly for effort or velocity mode
-            header = ser.readline().decode().strip()
-            parts = header.split(',')
-            try:
-                if parts[0] in ('E', 'e'):
-                    # Effort mode header: E,effort,size
-                    if len(parts) < 3:
-                        raise ValueError("not enough fields for effort header")
-                    _mode_str = parts[0]
-                    _control_val = float(parts[1])
-                    _size = int(parts[2])
-                    params = None
-                elif parts[0] in ('V', 'v'):
-                    # Velocity mode header: V,setpoint,kp,ki,size
-                    if len(parts) < 5:
-                        raise ValueError("not enough fields for velocity header")
-                    _mode_str = parts[0]
-                    _control_val = float(parts[1])
-                    kp = float(parts[2])
-                    ki = float(parts[3])
-                    _size = int(parts[4])
-                    params = {'kp': kp, 'ki': ki}
-                elif parts[0] in ('L', 'l'):
-                    # Line follow mode header: L,target,kp,ki,k_line,size
-                    if len(parts) < 6:
-                        raise ValueError("not enough fields for line follow header")
-                    _mode_str = parts[0]
-                    _control_val = float(parts[1])
-                    kp = float(parts[2])
-                    ki = float(parts[3])
-                    k_line = float(parts[4])
-                    _size = int(parts[5])
-                    params = {'kp': kp, 'ki': ki, 'k_line': k_line}
-                else:
-                    raise ValueError("unknown mode in header")
-            except Exception as e:
-                print(f"Failed to parse header '{header}': {e}")
-                continue
-
-            run_count += 1
-            run_name = f'run{run_count}'
-            runs[run_name] = create_run(_control_val, _size)
-            if params:
-                runs[run_name]['params'] = params
-            runs[run_name]['mode'] = _mode_str
-            # Provide informative print depending on mode
-            if _mode_str in ('E', 'e'):
-                print(f"Created {run_name} (E) eff={_control_val}, size={_size}")
-            elif _mode_str in ('V', 'v'):
-                print(f"Created {run_name} (V) sp={_control_val} Kp={kp:.2f} Ki={ki:.2f} size={_size}")
-            elif _mode_str in ('L', 'l'):
-                print(f"Created {run_name} (L) target={_control_val} Kp={kp:.2f} Ki={ki:.2f} K_line={k_line:.2f} size={_size}")
-
-
-            last_idx = -1
-            recv_line_num = 0 # counts how many lines were received, regardless of idx
-            while True:
-                line = ser.readline().decode().strip()
-                if not line:
-                    continue
-
-                # Check for end of stream marker
-                if line.startswith("#END"):
-                    print("Received end of stream marker from Romi.")
-                    break
-
-                try:
-                    # Try to split and parse fields
-                    idx_str, time_s, left_pos, right_pos, left_vel, right_vel = line.split(',')
-                    idx = int(idx_str)
-                except ValueError:
-                    print(f"[Rejected] Received line #{recv_line_num}: could not parse the index. Raw: '{line}'")
-                    recv_line_num += 1
-                    continue
-
-                # Try to convert valid numeric data
-                try:
-                    runs[run_name]["motor_data"].loc[idx, "_time"] = float(time_s)
-                    runs[run_name]["motor_data"].loc[idx, "_left_pos"] = float(left_pos)
-                    runs[run_name]["motor_data"].loc[idx, "_right_pos"] = float(right_pos)
-                    runs[run_name]["motor_data"].loc[idx, "_left_vel"] = float(left_vel)
-                    runs[run_name]["motor_data"].loc[idx, "_right_vel"] = float(right_vel)
-                except ValueError:
-                    print(f"[Rejected] Line #{recv_line_num}: numeric conversion failed. Raw: '{line}'")
-                    recv_line_num += 1
-                    continue
-
-                last_idx = idx
-                recv_line_num += 1
-
-                # Stop if we've received all expected samples
-                if last_idx >= (_size - 1):
-                    print(f"All { _size } samples received for {run_name}.")
-                    break
-
-            if run_count == 10:
-                print(f"Automated test is finished ({run_count} runs completed). Hit 'x' to plot data.")
-
-
-    except KeyboardInterrupt:
-        print("\nAutomated sequence interrupted by user (Ctrl-C). Sending kill and closing serial port.")
-        try:
-            if ser and hasattr(ser, 'is_open') and ser.is_open:
-                try:
-                    ser.write(b'k')
-                except Exception:
-                    pass
-                try:
-                    ser.close()
-                except Exception as e:
-                    print(f"Error closing serial port: {e}")
-                else:
-                    print("Serial port closed.")
-        finally:
-            return
-
-# Function to run an automated closed-loop test
-def run_closed_loop_test():
-    global ser, runs, run_count, current_setpoint, control_mode, streaming, running
-
-    if control_mode == 0:
-        ser.write(b'e')
-        sleep(0.1)
-    elif control_mode == 2:
-        ser.write(b'e')
-        sleep(0.1)
-        ser.write(b'e')
-        sleep(0.1)
-    
-    print("Switching to velocity mode for closed-loop test...")
-    control_mode = 1
-
-
-    try:
-
-        # Get test parameters from user
-        kp = float(input("Enter proportional gain (Kp): "))
-        ki = float(input("Enter integral gain (Ki): "))
-        setpoint = int(input("Enter velocity setpoint (rad/s): "))
-
-        # Send Kp
-        kp_int = int(kp * 100)
-        cmd = f"p{abs(kp_int):04d}"
-        ser.write(cmd.encode())
-        sleep(0.1)
-
-        # Send Ki
-        ki_int = int(ki * 100)
-        cmd = f"i{abs(ki_int):04d}"
-        ser.write(cmd.encode())
-        sleep(0.1)
-
-        # Send setpoint
-        cmd = 'y' if setpoint >= 0 else 'z'
-        cmd += f"{abs(setpoint):04d}"
-        ser.write(cmd.encode())
-        current_setpoint = setpoint
-        sleep(0.1)
-
-        print(f"\nTest parameters set:")
-        print(f"Kp: {kp}")
-        print(f"Ki: {ki}")
-        print(f"Setpoint: {setpoint} rad/s")
-        input("Press Enter to start the test...")
-
-        # Start test
-        print("Starting test...")
-        ser.write(b'g')
-        running = True
-
-        # Wait for test completion
-        while running:
-            if ser.in_waiting:
-                ch = ser.read().decode()
-                if ch == 'q':
-                    print("Test complete. Starting data stream...")
-                    running = False
-            sleep(0.05)
-
-        # Stream data
-        ser.write(b's')
-        streaming = True
-
-    except ValueError:
-        print("Invalid input. Test aborted.")
-        return
-    except KeyboardInterrupt:
-        print("\nTest interrupted by user.")
-        if ser and ser.is_open:
-            ser.write(b'k')  # Kill motors
-        return
+print("Begin Program:")
 
 # Create 'runs' directory if it doesn't exist
 try:
@@ -417,33 +186,47 @@ except Exception as e:
 # Establish Bluetooth connection
 try:
     ser = Serial('COM8', baudrate=115200, timeout=1)
-
 except SerialException:
     print("Unable to connect to port")
 
-# ser = Serial('COM8', baudrate=115200, timeout=1)
-
-print("Begin Program:")
 print(user_prompt)
+
+def start_stream_handshake(ser, timeout=2.0, retries=3):
+    """Send START and wait for ACK from MCU. Returns True if ACK received."""
+    for attempt in range(retries):
+        try:
+            ser.write(b'#START\n')
+            ser.flush()
+        except Exception:
+            return False
+
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                line = ser.readline().decode(errors='ignore').strip()
+            except Exception:
+                line = ''
+            if not line:
+                continue
+            if line == '$ACK':
+                return True
+            # ignore other lines
+        # retry
+    return False
 
 while True:
     try:
         # Check for key pressed
         if msvcrt.kbhit():
-            key = msvcrt.getch().decode()
-            # if key.isdigit() or key == 'a':
-            #     if running:
-            #         print("Cannot set effort at this time. Try again when test is finished")
-            #     elif streaming:
-            #         print("Cannot set effort at this time. Data streaming in progress")
-            #     else:
-            #         ser.write(key.encode())
-            #         effort = key_to_eff(key)
+            try:
+                # Prefer getwch which returns a Python string and handles wide chars
+                key = msvcrt.getwch()
+            except Exception:
+                try:
+                    key = msvcrt.getch().decode(errors='ignore')
+                except Exception:
+                    key = ''
 
-            #         if key == 'a':
-            #             print(f"Effort value set to 100%. Enter 'g' to begin test.")
-            #         else:
-            #             print(f"Effort value set to {key}0%. Enter 'g' to begin test.")
             if key == 't':
                 if running:
                     print("Cannot select test while test is running")
@@ -458,25 +241,33 @@ while True:
                     if selected == 'e':
                         control_mode = 0
                         print("Selected Effort mode")
-                        effort = int(input("Enter effort (0-100%) in steps of 10%: "))
-                        try:
-                            if effort < 0 or effort > 100 or effort % 10 != 0:
-                                raise ValueError("Effort must be between 0 and 100 in steps of 10")
-                        except ValueError as e:
-                            print(e)
-                            continue
+                        # Accept a single key (0-9 or 'a') or an integer percentage 0-100
+                        key_in = input("Enter effort key (0-9 or 'a' for 100%) or percent (0-100): ").strip()
+                        eff_val = key_to_eff(key_in)
+                        if eff_val is None:
+                            # Try parse as integer percent
+                            try:
+                                perc = int(key_in)
+                                if perc < 0 or perc > 100:
+                                    raise ValueError()
+                                eff_val = perc
+                            except Exception:
+                                print("Invalid effort entry. Use 0-9, 'a', or a number 0-100.")
+                                continue
+                        effort = eff_val
                         line = 'e' + eff_to_key(effort)
                     elif selected == 'v':
                         control_mode = 1
                         print("Selected Velocity mode")
-                        gains = input("Enter Kp and Ki separated by a comma (e.g., 1.5,0.1): ")
+                        gains = input("Enter setpoint, Kp, and Ki separated by a comma (e.g., 40,1.5,0.1): ")
                         try:
-                            kp_str, ki_str = gains.split(',')
+                            sp_str, kp_str, ki_str = gains.split(',')
+                            setpoint = int(sp_str)
                             kp = float(kp_str)
                             ki = float(ki_str)
                             kp_int = int(kp * 100)
                             ki_int = int(ki * 100)
-                            line = f'v{kp_int:04d}{ki_int:04d}'
+                            line = f'v{setpoint:04d}{kp_int:04d}{ki_int:04d}'
                         except ValueError:
                             print("Invalid format. Please enter two numbers separated by a comma.")
 
@@ -510,28 +301,29 @@ while True:
             
             if key == 'u':
                 if running:
-                    print("Cannot add tests to stack while test is running")
+                    print("Cannot add tests to queue while test is running")
                 elif streaming:
-                    print("Cannot add tests to stack while data is streaming")
+                    print("Cannot add tests to queue while data is streaming")
                 else:
                     print(("Select from the following:"))
-                    print("  l: View items in stack")
-                    print("  c: Clear stack")
-                    print("  a: Add test to stack")
+                    print("  l: View items in queue")
+                    print("  c: Clear queue")
+                    print("  a: Add test to queue")
                     selected = input("Enter choice (l, c, a, or q to quit): ")
                     if selected == 'l':
-                        if not stack:
-                            print("Stack is empty.")
+                        if my_queue.is_empty():
+                            print("Queue is empty.")
                         else:
-                            print("Current stack:")
-                            for t in stack:
+                            print("Current queue:")
+                            for i in my_queue.items:
                                 # Format for test is (mode, param1, param2, ...)
-                                print(t)
+                                print(i)
                     
                     elif selected == 'c':
-                        stack.clear()
+                        while not my_queue.is_empty():
+                            my_queue.dequeue()
                         ser.write(b'uc')  # send clear command to Romi
-                        print("Stack cleared.")
+                        print("Queue cleared.")
                     elif selected == 'a':
                         # For now only allow adding effort tests
                         eff = input("Enter effort test in the following format: start, end, step (e.g., 0,100,10): ")
@@ -542,22 +334,18 @@ while True:
                             step = int(step_str)
                             if start < 0 or end > 100 or step <= 0 or start > end:
                                 raise ValueError("Invalid range or step")
-                            # Add tests to stack in LIFO order
-                            for e in range(end, start - 1, -step):
-                                stack.append( ('effort', e) )
+                            # Add tests to queue
+                            for e in range(start, end + 1, step):
+                                my_queue.enqueue( ('effort', e) )
                             ser.write(b'ua')  # send add command to Romi
-                            for i in stack:
-                                if i[0] == 'effort':
-                                    cmd = 'e' + eff_to_key(i[1])
-                                    ser.write(cmd.encode())
-                                    sleep(0.1)
-                                else:
-                                    print(f"Unknown test type in stack: {i[0]}")
-                            print("Effort test added to stack.")
+                            for i in my_queue.items:
+                                cmd = 'e' + eff_to_key(i[1])
+                                ser.write(cmd.encode())
+                                sleep(0.1)
                         except ValueError as e:
                             print(f"Invalid format: {e}")
                     elif selected == 'q':
-                        print("Stack operation cancelled.")
+                        print("Queue operation cancelled.")
                         continue
                     
             if key == 'r':
@@ -582,10 +370,19 @@ while True:
                 elif streaming:
                     print("Data is already streaming.")
                 else:
-                    # Tell Romi to stream data to PC
-                    ser.write(b's')
+                    # Start handshake with MCU
+                    ok = start_stream_handshake(ser)
+                    if not ok:
+                        # Fallback: try legacy single-char start for compatibility
+                        try:
+                            ser.write(b's')
+                        except Exception:
+                            pass
+                        print("Stream handshake failed; sent legacy 's' command (best-effort).")
+                    else:
+                        print("MCU acknowledged streaming request")
 
-                    # Flush serial port
+                    # Flush any initial bytes
                     if ser.in_waiting:
                         ser.read()
 
@@ -603,148 +400,24 @@ while True:
                     print("  2: IMU")
                     selected = input("Enter choice (1 or 2): ")
                     if selected == '1':
-                        ser.write(b'c1')
                         print("IR sensor calibration command sent to Romi.")
+                        key = input("Place Romi on white surface and press any key to continue...")
+                        ser.write(b'w')
+                        print("White calibration done. Now place Romi on black surface.")
+                        key = input("Place Romi on black surface and press any key to continue...")
+                        ser.write(b'b')
+                        print("Black calibration done.")
                     elif selected == '2':
-                        ser.write(b'c2')
                         print("IMU calibration command sent to Romi.")
                     else:
                         print("Invalid selection. Enter '1' or '2'.")
 
-            # elif key == 'n':
-            #     if not running and not streaming:
-            #         print("Toggle mode")
-            #         ser.write(b'n')
-            #         if mode == 1:
-            #             print("Romi will drive in a straight line.")
-            #             mode = 2
-            #         elif mode == 2:
-            #             print("Romi will pivot in place.")
-            #             mode = 3
-            #         else:
-            #             mode = 1
-            #             print("Romi will follow an arc.")
-
-            # elif key == 'm':
-            #     if running:
-            #         print("Cannot change control mode while test is running")
-            #     elif streaming:
-            #         print("Cannot change control mode while streaming")
-            #     else:
-            #         ser.write(b'm')
-            #         control_mode = (control_mode + 1) % 3
-            #         mode_str = "effort" if control_mode == 0 else "velocity" if control_mode == 1 else "line following"
-            #         print(f"Switched to {mode_str} control mode")
-
-            # elif key == 't':
-            #     if running:
-            #         print("Cannot set velocity setpoint while test is running")
-            #     elif streaming:
-            #         print("Cannot set velocity setpoint while streaming")
-            #     elif control_mode != 1:
-            #         print("Must be in velocity mode to set setpoint")
-            #     else:
-            #         try:
-            #             # Get setpoint from user
-            #             setpoint = input("Enter velocity setpoint (rad/s): ")
-            #             setpoint = int(setpoint)
-            #             # Format: 'yXXXX' for positive, 'zXXXX' for negative
-            #             cmd = 'y' if setpoint >= 0 else 'z'  # 'y' for positive, 'z' for negative
-            #             cmd += f"{abs(setpoint):04d}"  # Always send magnitude as 4 digits
-            #             ser.write(cmd.encode())
-            #             current_setpoint = setpoint
-            #             sign_str = "+" if setpoint >= 0 else "-"
-            #             print(f"Velocity setpoint set to {sign_str}{abs(setpoint)} rad/s")
-            #         except ValueError:
-            #             print("Invalid input. Please enter an integer.")
-
-            # elif key == 'i':
-            #     if running:
-            #         print("Cannot set Ki while test is running")
-            #     elif streaming:
-            #         print("Cannot set Ki while streaming")
-            #     else:
-            #         try:
-            #             # Get Ki from user
-            #             ki = input("Enter integral gain (Ki): ")
-            #             ki = float(ki)
-            #             # Send Ki to Romi - format: 'iXXXX' where XXXX is Ki*100
-            #             ki_int = int(ki * 100)  # Scale up by 100 to send as integer
-            #             cmd = f"i{abs(ki_int):04d}"
-            #             ser.write(cmd.encode())
-            #             print(f"Integral gain set to {ki}")
-            #         except ValueError:
-            #             print("Invalid input. Please enter a number.")
-
-            # elif key == 'p':
-            #     if running:
-            #         print("Cannot set Kp while test is running")
-            #     elif streaming:
-            #         print("Cannot set Kp while streaming")
-            #     else:
-            #         try:
-            #             # Get Kp from user
-            #             kp = input("Enter proportional gain (Kp): ")
-            #             kp = float(kp)
-            #             # Send Kp to Romi - format: 'pXXXX' where XXXX is Kp*100
-            #             kp_int = int(kp * 100)  # Scale up by 100 to send as integer
-            #             cmd = f"p{abs(kp_int):04d}"
-            #             ser.write(cmd.encode())
-            #             print(f"Proportional gain set to {kp}")
-            #         except ValueError:
-            #             print("Invalid input. Please enter a number.")
-            
-            elif key == 'w':
-                # IR white calibration (Nucleo will print the table to USB REPL;
-                # some prints may also echo here if your firmware routes them)
-                if running or streaming:
-                    print("Cannot calibrate while running/streaming")
-                else:
-                    ser.write(b'w')
-                    print("Sent IR WHITE calibration command. Check USB PuTTY for the calibration table.")
-
             elif key == 'b':
-                # IR black calibration
-                if running or streaming:
-                    print("Cannot calibrate while running/streaming")
-                else:
-                    ser.write(b'b')
-                    print("Sent IR BLACK calibration command. Check USB PuTTY for the calibration table.")
-
-            # elif key == 'l':
-            #     # Set gains for line-following
-            #     if running:
-            #         print("Cannot set line-following gains while test is running")
-            #     elif streaming:
-            #         print("Cannot set line-following gains while streaming")
-            #     else:
-            #         try:
-            #             # Get line-following gains from user
-            #             kp = input("Enter closed-loop proportional gain (Kp): ")
-            #             kp = float(kp)
-            #             ki = input("Enter closed-loop integral gain (Ki): ")
-            #             ki = float(ki)
-            #             k_line = input("Enter line-following proportional gain (K_line): ")
-            #             k_line = float(k_line)
-            #             v_target = input("Enter line-following target: ")
-            #             v_target = float(v_target)
-            #             # Send line-following gains to Romi - format: 'lppppiiiilllltttt' where pppp is Kp*100, iiii is Ki*100, llll is K_line*100, and tttt is target
-            #             kp_int = int(kp * 100)
-            #             ki_int = int(ki * 100)
-            #             k_line_int = int(k_line * 100)
-            #             v_target_int = int(v_target * 100)
-            #             cmd = f"l{kp_int:04d}{ki_int:04d}{k_line_int:04d}{v_target_int:04d}"
-            #             ser.write(cmd.encode())
-            #             print(f"Line-following gains set to Kp={kp}, Ki={ki}, K_line={k_line}, Setpoint={v_target}")
-            #         except ValueError:
-            #             print("Invalid input. Please enter numbers for gains.")
-
-            elif key == 'v':
                 # Request battery voltage (firmware will respond with a number and newline)
                 if streaming:
                     print("Battery query deferred (currently streaming)")
                 else:
-                    ser.write(b'v')
+                    ser.write(b'V')
                     # try to read a short reply
                     sleep(0.05)
                     try:
@@ -757,106 +430,197 @@ while True:
                         print("Requested battery voltage.")
 
             elif key == 'd':
-                # Plot and save the latest run's motor_data to CSV
-                if run_count == 0:
+                # Unified command: prompt user for single/latest or all runs and whether to save CSVs, plots, or both
+                # Ensure base 'runs' and subfolders exist
+                try:
+                    os.makedirs('runs', exist_ok=True)
+                    csv_dir = os.path.join('runs', 'csvs')
+                    plots_dir = os.path.join('runs', 'plots')
+                    os.makedirs(csv_dir, exist_ok=True)
+                    os.makedirs(plots_dir, exist_ok=True)
+                except Exception as e:
+                    print(f"Warning: could not create runs subdirectories: {e}")
+
+                if not runs:
                     print("No runs available to display or save.")
                 else:
-                    run_name = f'run{run_count}'
-                    df = runs[run_name]["motor_data"]
-                    # Clean data: remove zeros except leading zeros
-                    df_clean, removed = clean_data(df, mode='all')
-                    if removed:
-                        print(f"Removed {removed} all-zero rows from {run_name} before plotting/saving")
-                    x = df_clean["_time"]
-                    y = df_clean["_left_vel"]
-                    plt.plot(x, y)
-                    plt.xlabel("Time, [ms]")
-                    plt.ylabel("Left velocity, [rad/s]")
+                    print("Select target to save/plot:")
+                    print("  l : Latest run")
+                    print("  a : All runs (combined plot and/or individual CSVs)")
+                    print("  c : Cancel")
+                    target = input("Enter choice (l/a/c): ").strip().lower()
+                    if target == 'c' or target == '':
+                        print("Operation cancelled.")
+                        continue
 
-                    # Determine whether this run was in effort or velocity mode and build filenames accordingly
-                    run_mode = runs[run_name].get('mode', 'E')  # 'E' or 'V'
-                    control_val = runs[run_name].get('control_val', 'unknown')
+                    print("Select output type:")
+                    print("  p : plots only")
+                    print("  c : csvs only")
+                    print("  b : both plots and csvs")
+                    print("  n : none (cancel)")
+                    out = input("Enter choice (p/c/b/n): ").strip().lower()
+                    if out == 'n' or out == '':
+                        print("Operation cancelled.")
+                        continue
 
-                    if run_mode in ('V', 'v'):
-                        params = runs[run_name].get('params', {})
-                        kp = params.get('kp', 0.0)*100
-                        ki = params.get('ki', 0.0)*100
-                        label = f"SP={control_val} Kp={kp:.2f} Ki={ki:.2f}"
-                        fig_name = f"runs/{run_name}_V_sp{control_val}_Kp{kp:.2f}_Ki{ki:.2f}_left_vel.png"
-                        csv_name = f"runs/{run_name}_V_sp{control_val}_Kp{kp:.2f}_Ki{ki:.2f}.csv"
-                    else:
-                        # Effort mode
-                        label = f"Effort={control_val}"
-                        fig_name = f"runs/{run_name}_E_eff{control_val}_left_vel.png"
-                        csv_name = f"runs/{run_name}_E_eff{control_val}.csv"
+                    save_plots = out in ('p', 'b')
+                    save_csvs = out in ('c', 'b')
 
-                    # Add legend with the control parameters
-                    try:
-                        plt.legend([label])
-                    except Exception:
-                        pass
+                    # Prompt user for which data channels to include
+                    print("Select data to include (comma-separated):")
+                    print("  1 : left motor velocity")
+                    print("  2 : right motor velocity")
+                    print("  3 : left motor position")
+                    print("  4 : right motor position")
+                    data_sel = input("Enter choices (e.g. 1,2,3): ").strip()
+                    if not data_sel:
+                        print("No data selections made. Operation cancelled.")
+                        continue
+                    # map selection to dataframe columns and short codes
+                    sel_map = {
+                        '1': ('_left_vel', 'Left velocity', 'lv'),
+                        '2': ('_right_vel', 'Right velocity', 'rv'),
+                        '3': ('_left_pos', 'Left position', 'lp'),
+                        '4': ('_right_pos', 'Right position', 'rp')
+                    }
+                    chosen = []
+                    for token in [t.strip() for t in data_sel.split(',')]:
+                        if token in sel_map and token not in chosen:
+                            chosen.append(token)
+                    if not chosen:
+                        print("No valid data selections found. Operation cancelled.")
+                        continue
 
-                    # Save figure and CSV
-                    plt.savefig(fig_name)
-                    plt.close()
+                    # Prepare a variable suffix for filenames
+                    var_suffix = "_".join([sel_map[k][2] for k in chosen])
 
-                    try:
-                        df_clean.to_csv(csv_name, index=False)
-                        print(f"Saved motor_data to {csv_name}")
-                    except Exception as e:
-                        print(f"Failed to save CSV {csv_name}: {e}")
+                    def normalize_mode(mode_val):
+                        try:
+                            return mode_val[0].lower()
+                        except Exception:
+                            return 'e'
 
-                    print(f"Saved figure to {fig_name}")
-                    print(user_prompt)
+                    if target == 'l':
+                        run_name = f'run{run_count}'
+                        meta = runs.get(run_name)
+                        if not meta:
+                            print(f"Run {run_name} not found.")
+                            continue
 
-            elif key == 'r':
-                # Run automated sequence for efforts 0..100 step 10
-                print("Starting automated batch: efforts 0 to 100 by 10")
-                efforts = list(range(0, 91, 10))
-                auto_run_sequence(efforts)
-
-            elif key == 'x':
-                # Plot all runs at once
-                if not runs:
-                    print("No runs available to plot.")
-                else:
-                    plt.figure()
-                    for run_name, meta in runs.items():
                         df = meta["motor_data"]
-                        # Clean data: remove zeros except leading zeros
                         df_clean, removed = clean_data(df, mode='all')
                         if removed:
-                            print(f"Removed {removed} all-zero rows from {run_name} before plotting")
-                            
-                        mode = meta.get('mode', 'E')  # Default to effort mode for backward compatibility
+                            print(f"Removed {removed} all-zero rows from {run_name} before plotting/saving")
+
+                        mode_char = normalize_mode(meta.get('mode', 'E'))
                         control_val = meta.get('control_val', 'unknown')
-                        
-                        if mode == 'V':  # Velocity mode
-                            kp = meta.get('params', {}).get('kp', 0)
-                            ki = meta.get('params', {}).get('ki', 0)
-                            label = f"{run_name} (V) sp={control_val} Kp={kp:.2f} Ki={ki:.2f}"
-                        else:  # Effort mode
-                            label = f"{run_name} (E) eff={control_val}"
-                            
-                        plt.plot(df_clean["_time"], df_clean["_left_vel"], label=label)
 
-                    plt.xlabel("Time, [ms]")
-                    plt.ylabel("Left velocity, [rad/s]")
-                    plt.legend()
-                    # instead of plt.show()
-                    plt.savefig(f"runs/all_runs_velocity_response.png")
-                    plt.close()
+                        if mode_char == 'v':
+                            params = meta.get('params', {}) or {}
+                            kp = params.get('kp', 0.0) * 100
+                            ki = params.get('ki', 0.0) * 100
+                            label = f"SP={control_val} Kp={kp:.2f} Ki={ki:.2f}"
+                            base_name = f"{run_name}_V_sp{control_val}_Kp{kp:.2f}_Ki{ki:.2f}"
+                        else:
+                            label = f"Effort={control_val}"
+                            base_name = f"{run_name}_E_eff{control_val}"
 
-                    print("Saved plot of all runs to 'runs/all_runs_velocity_response.png'")
-                    print(user_prompt)
-            
-            # elif key == 'c':
-            #     if running:
-            #         print("Cannot start automated test while test is running")
-            #     elif streaming:
-            #         print("Cannot start automated test while streaming")
-            #     else:
-            #         run_closed_loop_test()
+                        if save_plots:
+                            # Save separate plot per selected channel for this single run
+                            for k in chosen:
+                                col, readable, code = sel_map[k]
+                                try:
+                                    plt.figure()
+                                    plt.plot(df_clean["_time"], df_clean[col], label=label)
+                                    plt.xlabel("Time, [ms]")
+                                    plt.ylabel(readable)
+                                    try:
+                                        plt.legend()
+                                    except Exception:
+                                        pass
+                                    fig_name = os.path.join(plots_dir, base_name + "_" + code + ".png")
+                                    plt.savefig(fig_name)
+                                    plt.close()
+                                    print(f"Saved figure to {fig_name}")
+                                except Exception as e:
+                                    print(f"Failed to save figure {code} for {run_name}: {e}")
+
+                        if save_csvs:
+                            # Save separate CSV per selected channel for this single run
+                            for k in chosen:
+                                col, readable, code = sel_map[k]
+                                try:
+                                    csv_name = os.path.join(csv_dir, base_name + "_" + code + ".csv")
+                                    cols = ["_time", col]
+                                    cols = [c for c in cols if c in df_clean.columns]
+                                    df_clean[cols].to_csv(csv_name, index=False)
+                                    print(f"Saved motor_data to {csv_name}")
+                                except Exception as e:
+                                    print(f"Failed to save CSV {code} for {run_name}: {e}")
+
+                        print(user_prompt)
+
+                    elif target == 'a':
+                        # Optionally create individual CSVs and a combined plot
+                        if save_plots:
+                            plt.figure()
+
+                        # For all-runs: for each selected channel, create combined plot across runs
+                        for k in chosen:
+                            col, readable, code = sel_map[k]
+                            if save_plots:
+                                plt.figure()
+                            # Save per-run CSVs for this channel
+                            for run_name, meta in runs.items():
+                                df = meta["motor_data"]
+                                df_clean, removed = clean_data(df, mode='all')
+                                if removed:
+                                    print(f"Removed {removed} all-zero rows from {run_name} before plotting/saving")
+
+                                mode_char = normalize_mode(meta.get('mode', 'E'))
+                                control_val = meta.get('control_val', 'unknown')
+
+                                if mode_char == 'v':
+                                    kp = meta.get('params', {}).get('kp', 0) if meta.get('params') else 0
+                                    ki = meta.get('params', {}).get('ki', 0) if meta.get('params') else 0
+                                    label = f"{run_name} (V) sp={control_val} Kp={kp:.2f} Ki={ki:.2f}"
+                                    base_name = f"{run_name}_V_sp{control_val}_Kp{kp:.2f}_Ki{ki:.2f}"
+                                else:
+                                    label = f"{run_name} (E) eff={control_val}"
+                                    base_name = f"{run_name}_E_eff{control_val}"
+
+                                if save_plots:
+                                    try:
+                                        plt.plot(df_clean["_time"], df_clean[col], label=label)
+                                    except Exception as e:
+                                        print(f"Failed to add plot {readable} for {run_name}: {e}")
+
+                                if save_csvs:
+                                    try:
+                                        csv_name = os.path.join(csv_dir, base_name + "_" + code + ".csv")
+                                        cols = ["_time", col]
+                                        cols = [c for c in cols if c in df_clean.columns]
+                                        df_clean[cols].to_csv(csv_name, index=False)
+                                        print(f"Saved motor_data to {csv_name}")
+                                    except Exception as e:
+                                        print(f"Failed to save CSV {code} for {run_name}: {e}")
+
+                            if save_plots:
+                                try:
+                                    plt.xlabel("Time, [ms]")
+                                    plt.ylabel(readable)
+                                    plt.legend()
+                                    fig_all = os.path.join(plots_dir, f"all_runs_{code}.png")
+                                    plt.savefig(fig_all)
+                                    plt.close()
+                                    print(f"Saved plot of all runs for {readable} to '{fig_all}'")
+                                except Exception as e:
+                                    print(f"Failed to save combined plot for {readable}: {e}")
+
+                        print(user_prompt)
+                    else:
+                        print("Unknown target choice. Press 'd' to try again.")
+                        print(user_prompt)
             
             elif key == 'h':
                 # Print helpful prompt
@@ -879,41 +643,7 @@ while True:
                         print(user_prompt)
                         running = False
                 elif streaming:
-                    # print("ve r streeming")
                     if first:
-                        # Read and parse header line (mode, control, params, size)
-                        # header_line = ser.readline().decode().strip()
-
-                        # if not header_line:
-                        #     continue
-                        # parts = header_line.split(',')
-                        # hdr_mode = parts[0].upper() if parts else 'E'  # 'E' for effort, 'V' for velocity, 'L' for line follow
-
-                        # try:
-                        #     if hdr_mode == 'E':
-                        #         control_val = float(parts[1])  # effort value
-                        #         size = int(parts[2])
-                        #         params = None
-                        #     elif hdr_mode == 'V':  # Velocity mode
-                        #         control_val = float(parts[1])  # setpoint value
-                        #         kp = float(parts[2])
-                        #         ki = float(parts[3])
-                        #         size = int(parts[4])
-                        #         params = {'kp': kp, 'ki': ki}
-                        #     elif hdr_mode == 'L':  # Line follow mode
-                        #         control_val = float(parts[1])  # target value
-                        #         kp = float(parts[2])
-                        #         ki = float(parts[3])
-                        #         k_line = float(parts[4])
-                        #         size = int(parts[5])
-                        #         params = {'kp': kp, 'ki': ki, 'k_line': k_line}
-                        #     else:
-                        #         print(f"Unknown header mode: '{header_line}'")
-                        #         continue
-                        # except Exception as e:
-                        #     print(f"Failed to parse header '{header_line}': {e}")
-                        #     continue
-
                         mode_name = control_mode_dict[control_mode]
                         sample_size = 250
                         params = None
@@ -921,7 +651,8 @@ while True:
                         # Create new run
                         run_count += 1
                         run_name = f'run{run_count}'
-                        runs[run_name] = create_run(effort, sample_size)
+                        runs[run_name] = create_run(effort, run_count, sample_size)
+                        # Add in params if in velocity mode and line-following mode
                         if params:
                             runs[run_name]['params'] = params
                         runs[run_name]['mode'] = mode_name
@@ -937,6 +668,11 @@ while True:
 
                         if line.startswith("#END"):
                             print("Received end of stream marker from Romi. Hit 'd' to print data.")
+                            # Acknowledge end of stream
+                            try:
+                                ser.write(b'ACK_END\n')
+                            except Exception:
+                                pass
                             first = True
                             streaming = False
                             sleep(0.5)
@@ -953,6 +689,17 @@ while True:
                             continue
 
                         try:
+                            # Check index bounds before writing to dataframe
+                            size = runs.get(run_name, {}).get('size')
+                            if size is None:
+                                print(f"[Rejected] Line #{recv_line_num}: unknown run size for {run_name}")
+                                recv_line_num += 1
+                                continue
+                            if idx < 0 or idx >= size:
+                                print(f"[Rejected] Line #{recv_line_num}: index {idx} out of range for {run_name} (size={size})")
+                                recv_line_num += 1
+                                continue
+
                             runs[run_name]["motor_data"].loc[idx,"_time"] = float(time_s)
                             runs[run_name]["motor_data"].loc[idx, "_left_pos"] = float(left_pos)
                             runs[run_name]["motor_data"].loc[idx, "_right_pos"] = float(right_pos)
@@ -973,7 +720,16 @@ while True:
     except KeyboardInterrupt:
         break
 
-if ser.is_open:
-    ser.write(b'k')         # Kill motors
-ser.close()                 # Close port
+if 'ser' in locals() and getattr(ser, 'is_open', False):
+    try:
+        ser.write(b'k')         # Kill motors
+    except Exception:
+        pass
+    try:
+        ser.close()                 # Close port
+    except Exception:
+        pass
+else:
+    # If ser isn't available, nothing to close
+    pass
 print("Program interrupted")

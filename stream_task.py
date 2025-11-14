@@ -10,6 +10,7 @@
 
 
 import gc # garbage collector
+import time
 
 class StreamTask:
     """Streams data in CSV format over Bluetooth serial port to PC."""
@@ -24,12 +25,12 @@ class StreamTask:
     ### Initialize the object's attributes
     # --------------------------------------------------------------------------
     def __init__(self,
-                 eff, col_done, stream_data, uart5,
+                 eff, col_done, stream_data, uart,
                  time_q, left_pos_q, right_pos_q, left_vel_q, right_vel_q,
                  control_mode, setpoint, kp, ki, k_line, lf_target):
 
          # Serial interface (Bluetooth UART)
-        self.ser = uart5
+        self.ser = uart
 
         # Flags
         self.col_done = col_done
@@ -121,6 +122,8 @@ class StreamTask:
 
                 # Once all samples have been sent, mark the end of the stream
                 self.ser.write(b"#END\r\n") # explicit end marker for PC
+
+                # Do NOT block waiting for ACK here; ack handling will be done in UI task
                 # Reset flags
                 self.stream_data.put(0)
                 self.col_done.put(0) # reset done flag for next test
