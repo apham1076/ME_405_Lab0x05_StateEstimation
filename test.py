@@ -33,8 +33,8 @@ k_line = 0.0                # Current line following gain
 first = True
 done = False
 # mode = 1                    # 1, 2, 3 = straight, pivot, arc
-effort = 0                   # Current effort value
-my_queue = local_queue.Queue()           # Queue to hold tests
+queue = local_queue.Queue()           # Queue to hold tests
+queuing = False              # Set when queuing tests
 
 control_mode_dict = {0: "Effort", 1: "Velocity", 2: "Line Following"}
 
@@ -69,7 +69,7 @@ user_prompt = '''\r\nCommand keys:
     b      : Check battery voltage (prints to this terminal)
     c      : Calibrate sensors: IR sensors or IMU
     h      : Help / show this menu
-    ctrl-c : Interrupt this program\r\n
+    ctrl-c : Interrupt this program
 '''
 
 # # ************* HELPER FUNCTIONS **************
@@ -185,7 +185,7 @@ except Exception as e:
 
 # Establish Bluetooth connection
 try:
-    ser = Serial('COM8', baudrate=115200, timeout=1)
+    ser = Serial('COM3', baudrate=115200, timeout=1)
 except SerialException:
     print("Unable to connect to port")
 
@@ -218,14 +218,15 @@ while True:
     try:
         # Check for key pressed
         if msvcrt.kbhit():
-            try:
-                # Prefer getwch which returns a Python string and handles wide chars
-                key = msvcrt.getwch()
-            except Exception:
-                try:
-                    key = msvcrt.getch().decode(errors='ignore')
-                except Exception:
-                    key = ''
+            key = msvcrt.getch().decode()
+            # try:
+            #     # Prefer getwch which returns a Python string and handles wide chars
+            #     key = msvcrt.getwch()
+            # except Exception:
+            #     try:
+            #         key = msvcrt.getch().decode(errors='ignore')
+            #     except Exception:
+            #         key = ''
 
             if key == 't':
                 if running:
@@ -297,7 +298,7 @@ while True:
 
                     # Send configuration line to Romi    
                     ser.write(line.encode())
-                    print("Configuration sent to Romi.")
+                    print("Command sent to Romi. Hit 'r' to run the test.")
             
             if key == 'u':
                 if running:
@@ -311,17 +312,17 @@ while True:
                     print("  a: Add test to queue")
                     selected = input("Enter choice (l, c, a, or q to quit): ")
                     if selected == 'l':
-                        if my_queue.is_empty():
+                        if queue.is_empty():
                             print("Queue is empty.")
                         else:
                             print("Current queue:")
-                            for i in my_queue.items:
+                            for i in queue.items:
                                 # Format for test is (mode, param1, param2, ...)
                                 print(i)
                     
                     elif selected == 'c':
-                        while not my_queue.is_empty():
-                            my_queue.dequeue()
+                        while not queue.is_empty():
+                            queue.dequeue()
                         ser.write(b'uc')  # send clear command to Romi
                         print("Queue cleared.")
                     elif selected == 'a':
@@ -336,12 +337,7 @@ while True:
                                 raise ValueError("Invalid range or step")
                             # Add tests to queue
                             for e in range(start, end + 1, step):
-                                my_queue.enqueue( ('effort', e) )
-                            ser.write(b'ua')  # send add command to Romi
-                            for i in my_queue.items:
-                                cmd = 'e' + eff_to_key(i[1])
-                                ser.write(cmd.encode())
-                                sleep(0.1)
+                                queue.enqueue( ('effort', e) )
                         except ValueError as e:
                             print(f"Invalid format: {e}")
                     elif selected == 'q':
@@ -370,21 +366,23 @@ while True:
                 elif streaming:
                     print("Data is already streaming.")
                 else:
-                    # Start handshake with MCU
-                    ok = start_stream_handshake(ser)
-                    if not ok:
-                        # Fallback: try legacy single-char start for compatibility
-                        try:
-                            ser.write(b's')
-                        except Exception:
-                            pass
-                        print("Stream handshake failed; sent legacy 's' command (best-effort).")
-                    else:
-                        print("MCU acknowledged streaming request")
+                    # # Start handshake with MCU
+                    # ok = start_stream_handshake(ser)
+                    # if not ok:
+                    #     # Fallback: try legacy single-char start for compatibility
+                    #     try:
+                    #         ser.write(b's')
+                    #     except Exception:
+                    #         pass
+                    #     print("Stream handshake failed; sent legacy 's' command (best-effort).")
+                    # else:
+                    #     print("MCU acknowledged streaming request")
+
+                    ser.write(b's')
 
                     # Flush any initial bytes
-                    if ser.in_waiting:
-                        ser.read()
+                    # if ser.in_waiting:
+                    #     ser.read()
 
                     print("Data streaming to PC...")
                     streaming = True
@@ -621,16 +619,37 @@ while True:
                     else:
                         print("Unknown target choice. Press 'd' to try again.")
                         print(user_prompt)
+                        pass
             
             elif key == 'h':
                 # Print helpful prompt
                 print(user_prompt)
-            else:
-                print(f"Unknown command '{key}'. Press 'h' for help.")
+
+            # else:
+            #     print(f"Unknown command '{key}'. Press 'h' for help.")
 
             # Clear any remaining input
-            if ser.in_waiting:  
-                ser.read()
+            while msvcrt.kbhit():
+                msvcrt.getch()
+
+        elif not running and not streaming:
+            if not queue.is_empty():
+                next_test = queue.dequeue()
+                mode = next_test[0]
+                if mode == 'effort':
+                    effort = next_test[1]
+                    line = 'e' + eff_to_key(effort)
+                    control_mode = 0
+                    print(f"Queued next {mode} test: {effort}%")
+                else:
+                    print(f"Unknown test mode in queue: {mode}")
+                    continue
+                # Send command to Romi 
+                ser.write(line.encode())
+                sleep(0.2)
+                # Start test
+                ser.write(b'r')
+                running = True
         
         else:
             # Check for bytes waiting
@@ -640,7 +659,10 @@ while True:
                     ch = ser.read().decode()
                     if ch == 'q':
                         print("Testing is done. Press 's' to stream data")
-                        print(user_prompt)
+                        # print(user_prompt)
+                        sleep(0.1)
+                        ser.write(b's')  # Request data streaming
+                        streaming = True
                         running = False
                 elif streaming:
                     if first:
@@ -675,8 +697,8 @@ while True:
                                 pass
                             first = True
                             streaming = False
-                            sleep(0.5)
-                            print(user_prompt)
+                            sleep(0.2)
+                            # print(user_prompt)
                             continue
 
                         # Read line by line

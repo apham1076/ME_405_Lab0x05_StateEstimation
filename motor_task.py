@@ -163,12 +163,12 @@ class MotorControlTask:
                 if mode_val == 0:
                     effort = float(self.eff.get())
 
-                    # Battery droop compensation even in open-loop (effort) mode
-                    if self.battery is not None:
-                        try:
-                            effort *= self.battery.droop_gain()
-                        except Exception:
-                            pass  # fall back to raw effort on any ADC/battery reading error
+                    # # Battery droop compensation even in open-loop (effort) mode
+                    # if self.battery is not None:
+                    #     try:
+                    #         effort *= self.battery.droop_gain()
+                    #     except Exception:
+                    #         pass  # fall back to raw effort on any ADC/battery reading error
                     
                     # Clamp to safe limits and apply effort
                     left_effort  = max(-100, min(100, effort))

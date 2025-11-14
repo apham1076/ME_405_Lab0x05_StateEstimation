@@ -111,44 +111,51 @@ class UITask:
 
                 # Wait for user input (read available bytes non-blocking)
                 if self.ser.any():
-                    try:
-                        raw = self.ser.read(self.ser.any())
-                        text = raw.decode()
-                    except Exception:
-                        # Fallback to single-char read
-                        try:
-                            text = self.ser.read(1).decode()
-                        except Exception:
-                            text = ''
+                    ch = self.ser.read(1).decode()
+                    self.cmd_buf = ch
+                    # try:
+                    #     raw = self.ser.read(self.ser.any())
+                    #     text = raw.decode()
+                    #     print("Received text:", text)
+                    # except Exception:
+                    #     # Fallback to single-char read
+                    #     try:
+                    #         text = self.ser.read(1).decode()
+                    #     except Exception:
+                    #         text = ''
 
-                    if not text:
-                        continue
+                    # if not text:
+                    #     continue
 
-                    # Normalize and handle multi-byte messages like ACK_END
-                    lower = text.lower()
-                    if 'ack_end' in lower and self.ack_end:
-                        try:
-                            self.ack_end.put(1)
-                        except Exception:
-                            pass
-                        # remove ack_end token from text
-                        lower = lower.replace('ack_end', '')
-                        text = ''
+                    # # Normalize and handle multi-byte messages like ACK_END
+                    # lower = text.lower()
+                    # if 'ack_end' in lower and self.ack_end:
+                    #     try:
+                    #         self.ack_end.put(1)
+                    #     except Exception:
+                    #         pass
+                    #     # remove ack_end token from text
+                    #     print("ACK_END received")
+                    #     lower = lower.replace('ack_end', '')
+                    #     text = ''
 
-                    # Find first non-whitespace character to use as single-char command
-                    first_char = None
-                    for c in lower:
-                        if not c.isspace():
-                            first_char = c
-                            break
-                    if first_char:
-                        self.cmd_buf = first_char
-                        # Romi will send, PC's turn to receive
-                        # self.ser.write(b's')
-                        self.state = self.S2_PROCESS_COMMAND # set next state
-                    else:
-                        # No command found; remain waiting
-                        pass
+                    # # Find first non-whitespace character to use as single-char command
+                    # first_char = None
+                    # for c in lower:
+                    #     if not c.isspace():
+                    #         first_char = c
+                    #         break
+                    # if first_char:
+                    #     self.cmd_buf = first_char
+                    #     print("first_char:", first_char)
+                    #     # Romi will send, PC's turn to receive
+                    #     # self.ser.write(b's')
+                    #     self.state = self.S2_PROCESS_COMMAND # set next state
+                    # else:
+                    #     # No command found; remain waiting
+                    #     pass
+                    
+                    self.state = self.S2_PROCESS_COMMAND # set next state
             
             ### 2: PROCESS COMMAND STATE ---------------------------------------
             elif self.state == self.S2_PROCESS_COMMAND:
