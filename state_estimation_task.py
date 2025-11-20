@@ -57,7 +57,7 @@ class StateEstimationTask:
                       [-r/2], [r/2], [0], [0],
                       [-r/w], [r/w], [0], [0]])
 
-        B = np.array([[K], [0],
+        B = np.array([[K/tau], [0],
                       [0], [K/tau],
                       [0], [0],
                       [0], [0]])
