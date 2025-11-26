@@ -50,6 +50,7 @@ from data_task import DataCollectionTask
 from ui_task import UITask
 from stream_task import StreamTask
 from steering_task import SteeringTask
+from IMU_task import IMUTask
 from IMU_sensor import IMU
 from os import listdir
 
@@ -127,14 +128,21 @@ def main():
     # ----------------------------------------------------------------------
     # --- Data Shares...
     time_sh = task_share.Share('H', name='Time share')
-    left_pos_sh = task_share.Share('f', name= 'Left motor position share')
-    right_pos_sh = task_share.Share('f', name= 'Right motor position share')
-    left_vel_sh = task_share.Share('f', name= 'Left motor velocity share')
-    right_vel_sh = task_share.Share('f', name= 'Right motor velocity share')
+    left_pos_sh = task_share.Share('l', name= 'Left motor position share')
+    right_pos_sh = task_share.Share('l', name= 'Right motor position share')
+    left_vel_sh = task_share.Share('h', name= 'Left motor velocity share')
+    right_vel_sh = task_share.Share('h', name= 'Right motor velocity share')
+
+    # --- IMU data shares...
+    psi_sh = task_share.Share('f', name='Yaw Angle share')  # Yaw angle in radians
+    psi_dot_sh = task_share.Share('f', name='Yaw Rate share')  # Yaw rate in rad/s
+    # --- Initialize IMU shares
+    psi_sh.put(0.0)
+    psi_dot_sh.put(0.0)
 
     # --- Motor control shares...
     eff = task_share.Share('f', name='Requested Effort')  # float effort percent
-    setpoint = task_share.Share('h', name='Velocity Setpoint')  # 'h' for signed 16-bit to handle larger velocity values
+    setpoint = task_share.Share('f', name='Velocity Setpoint')  # setpoint share should ALWAYS store a value in rad/s !!!
     kp = task_share.Share('f', name='Proportional Gain')  # 'f' for float to store Kp
     ki = task_share.Share('f', name='Integral Gain')  # 'f' for float to store Ki
     # --- Initialize motor control shares
@@ -158,7 +166,7 @@ def main():
     right_sp_sh = task_share.Share('f', name='LF Right Setpoint')
     ir_cmd = task_share.Share('B', name='IR Calibrate Cmd')
     k_line = task_share.Share('f', name='LineFollow K_line')
-    lf_target = task_share.Share('f', name='LineFollow Target')
+    lf_target = task_share.Share('f', name='LineFollow Target') # setpoint share for line following should ALWAYS store a value in rad/s !!!
     # --- Initialize line following shares
     left_sp_sh.put(0.0)
     right_sp_sh.put(0.0)
@@ -174,11 +182,11 @@ def main():
     abort = task_share.Share('B', name='Abort Flag')
 
     # --- Data Queues...
-    time_q = task_share.Queue('H', size=MAX_SAMPLES, name='Time share')
-    left_pos_q = task_share.Queue('f', size=MAX_SAMPLES, name= 'Left motor position share')
-    right_pos_q = task_share.Queue('f', size=MAX_SAMPLES, name= 'Right motor position share')
-    left_vel_q = task_share.Queue('f', size=MAX_SAMPLES, name= 'Left motor velocity share')
-    right_vel_q = task_share.Queue('f', size=MAX_SAMPLES, name= 'Right motor velocity share')
+    time_q = task_share.Queue('H', size=MAX_SAMPLES, name='Time queue')
+    left_pos_q = task_share.Queue('l', size=MAX_SAMPLES, name= 'Left motor position queue')
+    right_pos_q = task_share.Queue('l', size=MAX_SAMPLES, name= 'Right motor position queue')
+    left_vel_q = task_share.Queue('h', size=MAX_SAMPLES, name= 'Left motor velocity queue')
+    right_vel_q = task_share.Queue('h', size=MAX_SAMPLES, name= 'Right motor velocity queue')
 
     # --- Data streaming shares...
     ack_end = task_share.Share('B', name='ACK End of Stream Flag')
@@ -217,6 +225,8 @@ def main():
                                  left_sp_sh, right_sp_sh,
                                  k_line, lf_target)
 
+    imu_task_obj = IMUTask(imu, psi_sh, psi_dot_sh)
+
 
 	# Create costask.Task WRAPPERS. (If trace is enabled for any task, memory will be allocated for state transition tracing, and the application will run out of memory after a while and quit. Therefore, use tracing only for debugging and set trace to False when it's not needed)
     _motor_task = cotask.Task(motor_task_obj.run, name='Motor Control Task', priority=3, period=5, profile=True, trace=False)
@@ -232,6 +242,11 @@ def main():
                              priority=2, period=40,
                              profile=True, trace=False)
 
+    _imu_task = cotask.Task(imu_task_obj.run,
+                             name='IMU Task',
+                             priority=3, period=10,
+                             profile=True, trace=False)
+
 
 	# Now add (append) the tasks to the scheduler list
     cotask.task_list.append(_motor_task)
@@ -239,6 +254,7 @@ def main():
     cotask.task_list.append(_ui_task)
     cotask.task_list.append(_stream_task)
     cotask.task_list.append(_steering_task)
+    cotask.task_list.append(_imu_task)
 
     ### The scheduler is ready to start ###
 

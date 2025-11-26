@@ -113,7 +113,7 @@ class StreamTask:
                     vR = self.right_vel_q.get()
                     # Put it all into a CSV-style line stamped with the index
                     # Build a framed message with delimiters for better PC parsing
-                    payload = f"{index},{t},{pL:.3f},{pR:.3f},{vL:.3f},{vR:.3f}"
+                    payload = f"{index},{t},{pL},{pR},{vL},{vR}"
                     framed = f"<S>{payload}<E>" # these start and end delimeters will help us process data on the PC side
                     # Send the line over Bluetooth
                     self.ser.write(framed.encode() + b"\n")

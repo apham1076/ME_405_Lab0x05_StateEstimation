@@ -3,25 +3,12 @@
 # ==============================================================================
 # DataCollectionTask
 # ------------------------------------------------------------------------------
-# This task logs samples (time, pos, and vel) from shares into arrays for CSV
-# export. Since we are creating an object (an instance of the class) of this
-# class, the object lives in memory as a single instance. We can then pass the
-# object to something else, like another task (class object). This allows the
-# other task (class object) to access the same actual instance (object) of this
-# class. Thus, we can reference the same arrays created in this task as long
-# as we pass the class object to any other tasks where we want to reference the
-# arrays.
-#
-# Alternatively, data can be stored into queues for continuous streaming of
-# data. Since we only need to send the data once (after the test is done),
-# using queues to transfer the data isn't necessary. None of the tasks for this
-# assignment need every sample in real time; we are mostly interested in a
-# final log of the results after recording.
+# This task logs samples (time, pos, and vel) from shares into queues for data 
+# logging and plotting.
 # ==============================================================================
 
 ### TO-DO: In state 2, consider setting col_done flag when buffers are full
 
-from array import array
 
 class DataCollectionTask:
     """Records motor data, moves values from shares and into queues."""
@@ -38,14 +25,27 @@ class DataCollectionTask:
     def __init__(self,
                  col_start, col_done,
                  mtr_enable, abort,
-                 time_q, left_pos_q, right_pos_q, left_vel_q, right_vel_q,
-                 time_sh, left_pos_sh, right_pos_sh, left_vel_sh, right_vel_sh):
+                 time_q, left_pos_q, right_pos_q, left_vel_q, right_vel_q, obsv_time_q, obsv_sL_q, obsv_sR_q, obsv_psi_q, obsv_psi_dot_q,
+                 time_sh, left_pos_sh, right_pos_sh, left_vel_sh, right_vel_sh, obsv_time_sh, obsv_sL_sh, obsv_sR_sh, obsv_psi_sh, obsv_psi_dot_sh):
 
         # Flags
         self.col_start = col_start
         self.col_done = col_done
         self.mtr_enable = mtr_enable
         self.abort = abort
+
+        # Shares
+        self.time_sh = time_sh
+        self.left_pos_sh = left_pos_sh
+        self.right_pos_sh = right_pos_sh
+        self.left_vel_sh = left_vel_sh
+        self.right_vel_sh = right_vel_sh
+
+        self.obsv_time_sh = obsv_time_sh
+        self.obsv_sL_sh = obsv_sL_sh
+        self.obsv_sR_sh = obsv_sR_sh
+        self.obsv_psi_sh = obsv_psi_sh
+        self.obsv_psi_dot_sh = obsv_psi_dot_sh
 
         # Queues
         self.time_q = time_q
@@ -54,12 +54,11 @@ class DataCollectionTask:
         self.left_vel_q = left_vel_q
         self.right_vel_q = right_vel_q
 
-        # Shares
-        self.time_sh = time_sh
-        self.left_pos_sh = left_pos_sh
-        self.right_pos_sh = right_pos_sh
-        self.left_vel_sh = left_vel_sh
-        self.right_vel_sh = right_vel_sh
+        self.obsv_time_q = obsv_time_q
+        self.obsv_sL_q = obsv_sL_q
+        self.obsv_sR_q = obsv_sR_q
+        self.obsv_psi_q = obsv_psi_q
+        self.obsv_psi_dot_q = obsv_psi_dot_q
 
         # ensure FSM starts in state S0_INIT
         self.state = self.S0_INIT
@@ -78,6 +77,12 @@ class DataCollectionTask:
                 self.right_pos_q.clear()
                 self.left_vel_q.clear()
                 self.right_vel_q.clear()
+
+                self.obsv_time_q.clear()
+                self.obsv_sL_q.clear()
+                self.obsv_sR_q.clear()
+                self.obsv_psi_q.clear()
+                self.obsv_psi_dot_q.clear()
 
                 self.state = self.S1_WAIT_FOR_START_COLLECTING # set next state
 
@@ -98,8 +103,17 @@ class DataCollectionTask:
                     self.right_pos_q.put(self.right_pos_sh.get())
                     self.left_vel_q.put(self.left_vel_sh.get())
                     self.right_vel_q.put(self.right_vel_sh.get())
-                
+
+                if not self.obsv_time_q.full() and not self.abort.get():
+                    self.obsv_time_q.put(self.obsv_time_sh.get())
+                    self.obsv_sL_q.put(self.obsv_sL_sh.get())
+                    self.obsv_sR_q.put(self.obsv_sR_sh.get())
+                    self.obsv_psi_q.put(self.obsv_psi_sh.get())
+                    self.obsv_psi_dot_q.put(self.obsv_psi_dot_sh.get())
+
+                    yield self.state
                 else:
+                    print("Queues full or abort signal received, stopping data collection.")
                     # Set flags
                     # self.col_start.put(0)
                     self.col_done.put(1)

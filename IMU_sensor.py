@@ -10,25 +10,31 @@ from pyb import delay
 from struct import calcsize, unpack_from
 from os import listdir
 
-class IMU:
-    '''A IMU driver interface that works with an IMU using a SCL, SDA, RST inputs such as the BNO055'''
 
-    DEV_ADDR = 0x28  # I2C address for the IMU
+class IMU:
+    '''An IMU driver interface that works with an IMU (such as the BO055) using SCL, SDA, RST inputs'''
 
     class reg:
         # Data registers and struct format strings
-        EULER_DATA_ALL = (0x1A, "<hhh")     # heading, roll, pitch (6 bytes)
-        GYRO_DATA_ALL  = (0x14, "<hhh")     # x, y, z (6 bytes)
-        CALIB_STAT     = (0x35, "<B")       # single byte
-        CALIB_PROFILE  = (0x55, "<hhhhhhhhhhh")  # 11 x 16-bit values (22 bytes)
-        OPR_MODE       = (0x3D, "<B")
-        SYS_TRIGGER    = (0x3F, "<B")
+        ACC_DATA_ALL  = (0x08, b"<hhh")      # x, y, z (6 bytes)
+        EULER_DATA_ALL = (0x1A, b"<hhh")     # heading, roll, pitch (6 bytes)
+        GYRO_DATA_ALL  = (0x14, b"<hhh")     # x, y, z (6 bytes)
+        CALIB_STAT     = (0x35, b"<B")       # single byte
+        CALIB_PROFILE  = (0x55, b"<hhhhhhhhhhh")  # 11 x 16-bit values (22 bytes)
+        OPR_MODE       = (0x3D, b"<B")
+        SYS_TRIGGER    = (0x3F, b"<B")
+        AXIS_MAP_CONFIG = (0x41, b"<B")
+        AXIS_MAP_SIGN   = (0x42, b"<B")
+        INT_MASK        = (0x0F, b"<B")
+        INT_ENABLE      = (0x10, b"<B")
 
     def __init__(self, i2c):
         '''Initialize an IMU object'''
         self._i2c = i2c
         self._buf = bytearray((0 for n in range(22))) # buffer for reading data
         self._current_mode = "config"  # Start in config mode
+
+        self._DEV_ADDR = 0x28  # I2C address for the IMU
 
         # Mode dictionary
         self.mode_dict = {
@@ -46,22 +52,46 @@ class IMU:
             "ndof_fmc_off": {"code": 0x0B, "name": "NDOF (Fast Mag Calibration Off)"},
             "ndof":         {"code": 0x0C, "name": "NDOF (Full 9-DOF Fusion)"}
         }
+        # Enable interrupts for data ready
+        msk = 0b00000001
+        buf = memoryview(self._buf)[:1]         # buf is type bytes of length 1
+        self._i2c.mem_read(buf, self._DEV_ADDR, self.reg.INT_ENABLE[0], timeout=100)
+        val = buf[0]        # convert bytes to int
+        val |= msk  # Set bit 0
+        self._i2c.mem_write(buf, self._DEV_ADDR, self.reg.INT_ENABLE[0], timeout=100)
+        self._i2c.mem_read(buf, self._DEV_ADDR, self.reg.INT_MASK[0], timeout=100)
+        val = buf[0]
+        val |= msk  # Set bit 0
+        self._i2c.mem_write(buf, self._DEV_ADDR, self.reg.INT_MASK[0], timeout=100)
 
+        # Reset interrupt
+
+
+        # Remap axes and signs to match robot frame
+        self._i2c.mem_write(bytes([0x21]), self._DEV_ADDR, self.reg.AXIS_MAP_CONFIG[0], timeout=100)
+        self._i2c.mem_write(bytes([0x04]), self._DEV_ADDR, self.reg.AXIS_MAP_SIGN[0], timeout=100)
         
         delay(700)  # Delay for IMU to start up
 
     # --------------------------------------------------------------------------
     def _read_reg(self, reg):
-        '''Generic register read method using calcsize() and unpack_from()'''
-        addr, fmt = reg
+        '''Generic register read method using calcsize() and unpack_from()
+
+        Added optional `debug` flag to measure and print the time spent in the
+        underlying I2C `mem_read` call. This helps identify whether the
+        communication is the bottleneck.
+        '''
+        # addr, fmt = reg
         # Determine number of bytes to read
-        length = calcsize(fmt)
-        # Create a memoryview object of the right size
+        length = calcsize(reg[1])
+        # Create a memoryview object of the right size (no extra allocation)
         buf = memoryview(self._buf)[:length]
+
         # Read from the I2C bus into the memoryview
-        self._i2c.mem_read(buf, IMU.DEV_ADDR, addr)
+        self._i2c.mem_read(buf, self._DEV_ADDR, reg[0])
+
         # Unpack the bytes into a tuple
-        return unpack_from(fmt, buf)
+        return unpack_from(reg[1], buf)
 
     # --------------------------------------------------------------------------
     def set_operation_mode(self, mode_name):
@@ -76,7 +106,7 @@ class IMU:
             return
         
         code = self.mode_dict[mode_name]["code"]
-        self._i2c.mem_write(bytes([code]), IMU.DEV_ADDR, self.reg.OPR_MODE[0], timeout=100)
+        self._i2c.mem_write(bytes([code]), self._DEV_ADDR, self.reg.OPR_MODE[0], timeout=100)
         delay(30)  # Small delay for mode switch
         self._current_mode = mode_name
         print(f"IMU operation mode set to {mode_name}")
@@ -148,7 +178,7 @@ class IMU:
         print("Calibration coefficients read from imu_cal.bin")
         # Write the coefficients to the IMU
         print("Writing calibration coefficients to IMU")
-        self._i2c.mem_write(coeffs, IMU.DEV_ADDR, self.reg.CALIB_PROFILE[0], timeout=100)
+        self._i2c.mem_write(coeffs, self._DEV_ADDR, self.reg.CALIB_PROFILE[0], timeout=100)
         delay(20) # Small delay for write to complete
         print("Calibration coefficients written to IMU")
 
@@ -160,25 +190,34 @@ class IMU:
     def read_euler_angles(self):
         '''Return the Euler angles (heading, roll, pitch) in degrees.'''
         # The 6 bytes are: H_LSB, H_MSB, R_LSB, R_MSB, P_LSB, P_MSB
-        print("Reading Euler angles")
+        # print("Reading Euler angles")
         heading, roll, pitch = self._read_reg(self.reg.EULER_DATA_ALL)
         # Convert to degrees (1 degree = 16 LSB) and return the values
-        return (heading / 16.0, roll / 16.0, pitch / 16.0)
+        return (-heading / 16.0, roll / 16.0, pitch / 16.0)
 
     # --------------------------------------------------------------------------
     def read_angular_velocity(self):
         '''Return the angular velocity (x, y, z) in degrees/s.'''
         # The 6 bytes are: X_LSB, X_MSB, Y_LSB, Y_MSB, Z_LSB, Z_MSB
-        print("Reading angular velocity")
+        # print("Reading angular velocity")
         x, y, z = self._read_reg(self.reg.GYRO_DATA_ALL)
         # Convert to degrees/s (1 degree/s = 16 LSB/s)
         return (x / 16.0, y / 16.0, z / 16.0)
     
     # --------------------------------------------------------------------------
+    def read_acceleration(self):
+        '''Return the linear acceleration (x, y, z) in m/s^2.'''
+        # The 6 bytes are: X_LSB, X_MSB, Y_LSB, Y_MSB, Z_LSB, Z_MSB
+        # print("Reading linear acceleration")
+        x, y, z = self._read_reg(self.reg.ACC_DATA_ALL)
+        # Convert to m/s^2 (1 m/s^2 = 16 LSB)
+        return (x / 100, y / 100, z / 100)
+    
+    # --------------------------------------------------------------------------
     def reset(self):
         '''Reset the IMU'''
         # The IMU reset is performed by setting bit 5 of the SYS_TRIGGER register, which we access via the reset_addr
-        self._i2c.mem_write(bytes([0x20]), IMU.DEV_ADDR, self.reg.SYS_TRIGGER[0], timeout=100)
+        self._i2c.mem_write(bytes([0x20]), self._DEV_ADDR, self.reg.SYS_TRIGGER[0], timeout=100)
         delay(700)  # Delay for reset to complete
         self._current_mode = "config"
         print("IMU reset complete; set to CONFIG mode")

@@ -1,13 +1,17 @@
-# Script to run on PC to run motor characterization test and perform data collection
+# test.py
+#
+# ==============================================================================
+# Script to run on PC to run motor characterization test and perform data
+# collection
+# ==============================================================================
 
-# Last modified: 11-13-25 7:30 PM
+### TO-DO:
+#
+#
 
-# # ************* NOTES **************
-
-# ************* TO-DO **************
-# Figure out why data is so jaggedy (message Charlie on Piazza)
-# Debug data streaming: use START and ACK
-
+# ==============================================================================
+# IMPORTS
+# ==============================================================================
 
 from serial import Serial, SerialException
 from time import sleep
@@ -18,7 +22,14 @@ import numpy as np
 import os
 import queue as local_queue
 import time
+import math
 
+# ==============================================================================
+# INITIALIZATION
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Variables
 key = ''                    # Stores value of key pressed as a string
 running = False             # Set when motor testing is progress
 streaming = False           # Set when data streaming is in progress
@@ -26,20 +37,24 @@ runs = {}                   # Dict to contain runs
 run_count = 0               # Number of runs
 frame_buffer = ""           # Buffer for delimiter-framed lines
 control_mode = 0            # 0 = effort mode, 1 = velocity mode, 2 = line follow mode
-effort = 0                 # Current effort value
-setpoint = 0               # Current velocity setpoint in rad/s
+effort = 0                  # Current effort value
+setpoint = 0                # Current velocity setpoint in rad/s
 kp = 0.0                    # Current proportional gain
 ki = 0.0                    # Current integral gain
 k_line = 0.0                # Current line following gain
 first = True
 done = False
-# mode = 1                   # 1, 2, 3 = straight, pivot, arc
-queue = local_queue.Queue()  # Queue to hold tests
-queuing = False              # Set when queuing tests
+# mode = 1                  # 1, 2, 3 = straight, pivot, arc
+queue = local_queue.Queue() # Queue to hold tests
+queuing = False             # Set when queuing tests
 test_origin = "manual"      # tracks how the current test started: "manual" or "queue"
 
+# --------------------------------------------------------------------------
+# Dictionary to map control mode number to string
 control_mode_dict = {0: "Effort", 1: "Velocity", 2: "Line Following"}
 
+# --------------------------------------------------------------------------
+# User prompt string
 user_prompt = '''\r\nCommand keys:
     t      : Select a test to run: Effort, Velocity, Line Following
     u      : Queue tests
@@ -53,6 +68,14 @@ user_prompt = '''\r\nCommand keys:
     ctrl-c : Interrupt this program
 '''
 
+# --------------------------------------------------------------------------
+# CONSTANTS FOR UNIT CONVERSIONS
+GEAR_RATIO = 3952/33  # Gear ratio of motor to wheel (~120)
+CPR_MOTOR = 12 # Counts per rev of the motor shaft (before gearbox)
+CPR_WHEEL = GEAR_RATIO*CPR_MOTOR  # Counts per rev of the wheel (~1440)
+RAD_PER_COUNT = 2 * (math.pi) / CPR_WHEEL  # Radians per count
+WHEEL_RADIUS_MM = 35  # Wheel radius in mm
+
 # ==============================================================================
 # HELPER FUNCTIONS
 # ==============================================================================
@@ -64,6 +87,7 @@ def eff_to_key(eff):
     # assume efforts are multiples of 10
     digit = int(eff // 10)
     return str(digit)
+
 # ------------------------------------------------------------------------------
 # Map a single-character key to an effort percentage (0-100)
 def key_to_eff(key):
@@ -73,6 +97,7 @@ def key_to_eff(key):
         digit = int(key)
         return digit * 10
     return None
+
 # ------------------------------------------------------------------------------
 # Function to create dictionary for storing data from one run
 def create_run(control_val, run_num, size):
@@ -93,6 +118,7 @@ def create_run(control_val, run_num, size):
     })
 
     return {"control_val": control_val, "run_num": run_num, "size": size, "motor_data": df}
+
 # ------------------------------------------------------------------------------
 # Function to clean DataFrame by removing all-zero rows except leading zeros
 def clean_data(df, cols=None, mode='all'):
@@ -153,6 +179,7 @@ def clean_data(df, cols=None, mode='all'):
 
     removed = len(df) - len(cleaned)
     return cleaned, removed
+
 # ------------------------------------------------------------------------------
 # Function to perform START / ACK handshake for data streaming
 def start_stream_handshake(ser, timeout=2.0, retries=3):
@@ -238,36 +265,49 @@ while True:
                                 continue
                         effort = eff_val
                         line = 'e' + eff_to_key(effort)
+
                     elif selected == 'v':
                         control_mode = 1
                         print("Selected Velocity mode")
-                        gains = input("Enter setpoint, Kp, and Ki separated by a comma (e.g., 40,1.5,0.1): ")
+                        gains = input("Enter setpoint (mm/s), Kp, and Ki separated by commas (e.g., 100,1.5,0.1): ")
                         try:
                             sp_str, kp_str, ki_str = gains.split(',')
-                            setpoint = int(sp_str)
+                            # Convert user's mm/s setpoint to rad/s
+                            v_mm_s = float(sp_str) # mm/s
+                            omega_rad_s = v_mm_s / WHEEL_RADIUS_MM  # rad/s
+                            # Scale setpoint by 100 to send as integer
+                            setpoint_scaled = int(omega_rad_s * 100)
                             kp = float(kp_str)
                             ki = float(ki_str)
-                            kp_int = int(kp * 100)
-                            ki_int = int(ki * 100)
-                            line = f'v{setpoint:04d}{kp_int:04d}{ki_int:04d}'
+                            # Scale gains by 100 to send as integers
+                            kp_scaled = int(kp * 100)
+                            ki_scaled = int(ki * 100)
+                            # Send as 4-digit integers
+                            line = f'v{setpoint_scaled:04d}{kp_scaled:04d}{ki_scaled:04d}'
+                            # store setpoint in mm/s for the data log
+                            setpoint = v_mm_s
                         except ValueError:
-                            print("Invalid format. Please enter two numbers separated by a comma.")
+                            print("Invalid format. Please enter three numbers separated by a comma.")
 
                     elif selected == 'l':
                         control_mode = 2
                         print("Selected Line Following mode")
-                        gains = input("Enter Kp, Ki, K_line, and target separated by commas (e.g., 1.5,0.1,2.0,0.5): ")
+                        gains = input("Enter Kp, Ki, K_line, and target separated by commas (e.g., 1.5,0.1,8.0,0.5): ")
                         try:
                             kp_str, ki_str, k_line_str, target_str = gains.split(',')
+                            # Convert user's mm/s target to rad/s
+                            v_mm_s = float(target_str) # mm/s
+                            omega_rad_s = v_mm_s / WHEEL_RADIUS_MM  # rad/s
+                            # Scale target by 100 to send as integer
+                            target_scaled = int(omega_rad_s * 100)
                             kp = float(kp_str)
                             ki = float(ki_str)
                             k_line = float(k_line_str)
-                            target = float(target_str)
-                            kp_int = int(kp * 100)
-                            ki_int = int(ki * 100)
-                            k_line_int = int(k_line * 100)
-                            target_int = int(target * 100)
-                            line = f'l{kp_int:04d}{ki_int:04d}{k_line_int:04d}{target_int:04d}'
+                            # Scale gains by 100 to send as integers
+                            kp_scaled = int(kp * 100)
+                            ki_scaled = int(ki * 100)
+                            k_line_scaled = int(k_line * 100)
+                            line = f'l{kp_scaled:04d}{ki_scaled:04d}{k_line_scaled:04d}{target_scaled:04d}'
                         except ValueError:
                             print("Invalid format. Please enter four numbers separated by commas.")
                     
@@ -295,6 +335,7 @@ while True:
                     if selected == 'l':
                         if queue.is_empty():
                             print("Queue is empty.")
+                            print(user_prompt)
                         else:
                             print("Current queue:")
                             for i in queue.items:
@@ -305,7 +346,12 @@ while True:
                         while not queue.is_empty():
                             queue.dequeue()
                         print("Queue cleared.")
+                        print(user_prompt)
                     elif selected == 'a':
+                        # Reset the run counter before starting a new queue
+                        run_count = 0
+                        runs.clear()
+
                         # For now only allow adding effort tests
                         eff = input("Enter effort test in the following format: start, end, step (e.g., 0,100,10): ")
                         try:
@@ -514,9 +560,30 @@ while True:
                                 col, readable, code = sel_map[k]
                                 try:
                                     plt.figure()
-                                    plt.plot(df_clean["_time"], df_clean[col], label=label)
+
+                                    # Determine y-axis label with units
+                                    if "pos" in col:
+                                        ylabel_text = readable + " [mm]"
+                                    elif "vel" in col:
+                                        ylabel_text = readable + " [mm/s]"
+                                    else:
+                                        ylabel_text = readable
+
+                                    # CONVERT THE RAW CSV DATA (COUNTS)
+                                    x_data = df_clean["_time"]
+                                    y_data = df_clean[col].copy() # Get raw counts or counts/s
+
+                                    # Convert based on column type
+                                    if "pos" in col:
+                                        # Convert counts to mm
+                                        y_data = y_data * RAD_PER_COUNT * WHEEL_RADIUS_MM
+                                    elif "vel" in col:
+                                        # Convert counts/s to mm/s
+                                        y_data = y_data * RAD_PER_COUNT * WHEEL_RADIUS_MM
+
+                                    plt.plot(x_data, y_data, label=label)
                                     plt.xlabel("Time, [ms]")
-                                    plt.ylabel(readable)
+                                    plt.ylabel(ylabel_text)
                                     try:
                                         plt.legend()
                                     except Exception:
@@ -531,7 +598,7 @@ while True:
                         print(user_prompt)
 
                     elif target == 'a':
-                        # Save individual CSVs for all runs and optionally create combined plots
+                        # Save CSV with all runs and optionally create combined plots
                         for run_name, meta in runs.items():
                             df = meta["motor_data"]
                             df_clean, removed = clean_data(df, mode='all')
@@ -564,6 +631,14 @@ while True:
                                 col, readable, code = sel_map[k]
                                 plt.figure()
                                 
+                                # Determine y-axis label with units
+                                if "pos" in col:
+                                    ylabel_text = readable + " [mm]"
+                                elif "vel" in col:
+                                    ylabel_text = readable + " [mm/s]"
+                                else:
+                                    ylabel_text = readable
+
                                 for run_name, meta in runs.items():
                                     df = meta["motor_data"]
                                     df_clean, removed = clean_data(df, mode='all')
@@ -578,14 +653,26 @@ while True:
                                     else:
                                         label = f"{run_name} (E) eff={control_val}"
 
+                                    # CONVERT THE RAW CSV DATA (COUNTS)
                                     try:
-                                        plt.plot(df_clean["_time"], df_clean[col], label=label)
+                                        x_data = df_clean["_time"]
+                                        y_data = df_clean[col].copy() # get raw counts or counts/s
+
+                                        if "pos" in col:
+                                            # Convert counts to mm
+                                            y_data = y_data * RAD_PER_COUNT * WHEEL_RADIUS_MM
+                                        elif "vel" in col:
+                                            # Convert counts/s to mm/s
+                                            y_data = y_data * RAD_PER_COUNT * WHEEL_RADIUS_MM
+
+                                        # Plot the converted data
+                                        plt.plot(x_data, y_data, label=label)
                                     except Exception as e:
                                         print(f"Failed to add plot {readable} for {run_name}: {e}")
 
                                 try:
                                     plt.xlabel("Time, [ms]")
-                                    plt.ylabel(readable)
+                                    plt.ylabel(ylabel_text)
                                     plt.legend()
                                     fig_all = os.path.join(plots_dir, f"all_runs_{code}.png")
                                     plt.savefig(fig_all)
@@ -654,8 +741,7 @@ while True:
                             params = {'setpoint': setpoint, 'kp': kp, 'ki': ki}
                         sample_size = 250    # Default sample size
 
-                        # Create new run
-                        run_count += 1
+                        # Create new run (run_count already at correct value)
                         run_name = f'run{run_count}'
                         runs[run_name] = create_run(effort, run_count, sample_size)
                         if params:
@@ -665,6 +751,7 @@ while True:
 
                         recv_line_num = 0
                         first = False
+                        run_count += 1 # increment after creating the run
                     
                     else:
                         # Read all the available bytes in the UART buffer
@@ -699,7 +786,7 @@ while True:
 
                             # For a normal frame, parse the CSV payload
                             try:
-                                idx_str, time_s, left_pos, right_pos, left_vel, right_vel = frame.split(',')
+                                idx_str, time_s, left_pos_c, right_pos_c, left_vel_c, right_vel_c = frame.split(',')
                                 idx = int(idx_str)
                             except ValueError:
                                 print(f"[Rejected] Bad frame contents: '{frame}'")
@@ -712,10 +799,10 @@ while True:
 
                             # Store the values
                             runs[run_name]["motor_data"].loc[idx,"_time"] = float(time_s)
-                            runs[run_name]["motor_data"].loc[idx, "_left_pos"] = float(left_pos)
-                            runs[run_name]["motor_data"].loc[idx, "_right_pos"] = float(right_pos)
-                            runs[run_name]["motor_data"].loc[idx, "_left_vel"] = float(left_vel)
-                            runs[run_name]["motor_data"].loc[idx, "_right_vel"] = float(right_vel)
+                            runs[run_name]["motor_data"].loc[idx, "_left_pos"] = float(left_pos_c)
+                            runs[run_name]["motor_data"].loc[idx, "_right_pos"] = float(right_pos_c)
+                            runs[run_name]["motor_data"].loc[idx, "_left_vel"] = float(left_vel_c)
+                            runs[run_name]["motor_data"].loc[idx, "_right_vel"] = float(right_vel_c)
 
                 else:
                     pass

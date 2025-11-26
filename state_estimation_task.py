@@ -3,128 +3,103 @@
 # ==============================================================================
 # StateEstimationTask
 # ------------------------------------------------------------------------------
-# This task predicts the future state of the system using a system model and sensor inputs
+# This task predicts the future state of the system using a system model and 
+# sensor inputs
 # ==============================================================================
 
+from pyb import millis
 from ulab import numpy as np
+import math
 
 class StateEstimationTask:
+    """Estimates the state of the robot using sensor inputs and a system model."""
+
+    # --------------------------------------------------------------------------
+    # CONSTANTS
+    GEAR_RATIO = 3952/33  # Gear ratio of motor to wheel (~120)
+    CPR_MOTOR = 12 # Counts per rev of the motor shaft (before gearbox)
+    CPR_WHEEL = GEAR_RATIO*CPR_MOTOR  # Counts per rev of the wheel (~1440)
+    RAD_PER_COUNT = 2 * (math.pi) / CPR_WHEEL  # Radians per count
+    WHEEL_RADIUS_MM = 35  # Wheel radius in mm
+    # --------------------------------------------------------------------------
 
     # The states of the FSM
     S0_INIT = 0
-    S1_WAIT_FOR_ENABLE = 1
-    S2_RUN = 2
+    S1_ESTIMATING = 1
 
     # --------------------------------------------------------------------------
-    ### Initialize the object's attributes
+    ### Initialize attributes
     # --------------------------------------------------------------------------
-    def __init__(self):
+    def __init__(self, start_time, obsv_time_sh, left_pos_sh, right_pos_sh, 
+                 left_vel_sh, right_vel_sh,
+                 psi_sh, psi_dot_sh, left_eff_sh, right_eff_sh,
+                 battery,
+                 obsv_sL_sh, obsv_sR_sh, obsv_psi_sh, obsv_psi_dot_sh,
+                 obsv_left_vel_sh, obsv_right_vel_sh, obsv_s_sh, obsv_yaw_sh):
 
-        # Shares
+        # Shares (inputs from other tasks)
+        self.start_time = start_time
+        self.obsv_time_sh = obsv_time_sh
+        self.left_pos_sh = left_pos_sh
+        self.right_pos_sh = right_pos_sh
+        self.left_vel_sh = left_vel_sh
+        self.right_vel_sh = right_vel_sh
+        self.psi_sh = psi_sh  # Yaw angle from IMU_task (rad)
+        self.psi_dot_sh = psi_dot_sh  # Yaw rate from IMU_task (rad/s)
+        self.left_eff_sh = left_eff_sh
+        self.right_eff_sh = right_eff_sh
 
-        # Queues
+        # Shares (outputs to other tasks)
+        self.obsv_sL_sh = obsv_sL_sh
+        self.obsv_sR_sh = obsv_sR_sh
+        self.obsv_psi_sh = obsv_psi_sh
+        self.obsv_psi_dot_sh = obsv_psi_dot_sh
+        self.obsv_left_vel_sh = obsv_left_vel_sh
+        self.obsv_right_vel_sh = obsv_right_vel_sh
+        self.obsv_s_sh = obsv_s_sh
+        self.obsv_yaw_sh = obsv_yaw_sh
 
-        # Flags
+        # Hardware
+        self.battery = battery
+        # Parameters
+        self.r = 0.035 # wheel radius (m)
+        self.w = 0.141  # wheelbase (distance between wheels) (m)
 
-        # Controllers
+        self.V_meas = self.battery.read_voltage()  # initial battery voltage
+
+        # Arrays for discrete-time state-space model        
+        self.A_D = np.array([[0, 0, 0.1331, 0],
+                             [0, 0, 0.1331, 0],
+                             [0, 0, 0, 0],
+                             [0, 0, 0, 0]])
+
+        self.B_D = np.array([[0.0406, 0.0373, -0.0666, -0.0666, 0, -2.0123],
+                             [0.0373, 0.0406, -0.0666, -0.0666, 0, 2.0123],
+                             [0, 0, 0.5, 0.5, 0, 0],
+                             [0, 0, -0.0698, 0.0698, 0.9902, 0.0001]])
+        
+        self.C = np.array([[0, 0, 1, -self.w/2],
+                           [0, 0, 1, self.w/2],
+                           [0, 0, 0, 1],
+                           [-self.r/self.w, self.r/self.w, 0, 0]])
+        
+        self.x_k = np.array([[0],
+                             [0], 
+                             [0],
+                             [0]])
+        
+        self.x_kplus1 = np.array([[0],
+                                 [0],
+                                 [0],
+                                 [0]])
+        
+        self.y_k = np.array([[0],
+                           [0],
+                           [0],
+                           [0]])
 
 
         self.state = self.S0_INIT # ensure FSM starts in state S0_INIT
-
-    # --------------------------------------------------------------------------
-    ### HELPER FUNCTIONS
-    # --------------------------------------------------------------------------
-
-    def state_eqn(t, x, u):
-        '''!@brief      Implements the  state equations for the open loop system
-            @param t    The value of time for a given simulation step
-            @param x    The value of the state vector for a given simulation step
-            @return     A tuple containing both the derivative of the state vector
-                        and the output vector for a given simulation step
-        '''
-        # x is an array representing the state vector with dimensions (4,1) containing [OmegaL; OmegaR; s; psi]
-        # u is an array representing the input vector with dimensions (2,1) containing [v_left; v_right]
-        # xd is an array representing the derivative of the state vector with dimensions (4,1) containing [OmegaL_dot; OmegaR_dot; s_dot; psi_dot]
-
-        # Placeholder parameters (to be replaced with actual system parameters)
-        r = 0.03       # wheel radius (m)
-        w = 0.15       # wheelbase (m)
-        K = 1.0      # motor gain (rad/s per V)
-        tau = 0.5    # motor time constant (s)
-        
-        A = np.array([[-1/tau], [0], [0], [0],
-                      [0], [-1/tau], [0], [0],
-                      [-r/2], [r/2], [0], [0],
-                      [-r/w], [r/w], [0], [0]])
-
-        B = np.array([[K], [0],
-                      [0], [K/tau],
-                      [0], [0],
-                      [0], [0]])
-
-        xd = np.dot(A, x) + np.dot(B, u)
-        
-        return xd
-    
-    def output_eqn(t, x, u):
-        '''!@brief      Implements the output equations for the system
-            @param t    The value of time for a given simulation step
-            @param x    The value of the state vector for a given simulation step
-            @return     A tuple containing both the derivative of the state vector
-                        and the output vector for a given simulation step
-        '''
-
-        # x is an array representing the state vector with dimensions (4,1) containing [OmegaL; OmegaR; s; psi]
-        # u is an array representing the input vector with dimensions (2,1) containing [v_left; v_right]
-        # y is an array representing the output vector with dimensions (4,1) containing [sL; sR; psi; psi_dot]
-
-        # Placeholder parameters (to be replaced with actual system parameters)
-        r = 0.03       # wheel radius (m)
-        w = 0.15       # wheelbase (m)
-        K = 1.0      # motor gain (rad/s per V)
-        tau = 0.5    # motor time constant (s)
-
-        C = np.array([[0], [0], [1], [-w/2],
-                      [0], [0], [1], [w/2],
-                      [0], [0], [0], [1],
-                      [-r/w], [r/w], [0], [0]])
-        
-        D = np.array([[0], [0],
-                      [0], [0],
-                      [0], [0],
-                      [0], [0]])
-
-        y = np.dot(C, x) + np.dot(D, u)
-        
-        return y
-    
-    def RK4_solver(fcn1, fcn2, x, tstep):
-        '''!@brief        Performs a single step of the RK4 solver
-            @param x      The current value of the state vector
-            @param fcn1   A function handle to the first function to solve
-            @param fcn2   A function handle to the second function to solve
-            @param tstep  The time step size to use for the integration algorithm
-            @return       A tuple the value of the state and output vectors after one time step
-        '''
-        # tstep should be the same as the period of this task
-        # Need to pass u into fcn1 and fcn2
-
-        # Evaluate the function handle at the several times with the
-        # value of the state vector to compute derivatives, k
-        k1, y1 = fcn1(0, x), fcn2(0, x)
-        k2, y2 = fcn1(0 + 0.5*tstep, x + 0.5*k1*tstep), fcn2(0 + 0.5*tstep, x + 0.5*k1*tstep)
-        k3, y3 = fcn1(0 + 0.5*tstep, x + 0.5*k2*tstep), fcn2(0 + 0.5*tstep, x + 0.5*k2*tstep)
-        k4, y4 = fcn1(0 + tstep, x + k3*tstep), fcn2(0 + tstep, x + k3*tstep)
-
-        # Evaluate a weighted-average of derivatives
-        xd = (k1 + 2*k2 + 2*k3 + k4)/6
-        y = (y1 + 2*y2 + 2*y3 + y4)/6
-
-        xout = x + xd.T*tstep
-        yout = y.T
-
-        # return tout, yout
-        return xout, yout
 
     # --------------------------------------------------------------------------
     ### FINITE STATE MACHINE
@@ -133,17 +108,61 @@ class StateEstimationTask:
         while True: # run infinite iterations of the FSM
             ### 0: INIT STATE --------------------------------------------------
             if (self.state == self.S0_INIT):
+                # Set initial yaw angle
+                s_L = self.left_pos_sh.get() * self.RAD_PER_COUNT * self.WHEEL_RADIUS_MM / 1000.0 # initial left wheel displacement (m)
+                s_R = self.right_pos_sh.get() * self.RAD_PER_COUNT * self.WHEEL_RADIUS_MM / 1000.0  # initial right wheel displacement (m)
+                psi = (s_R - s_L) / self.w  # initial yaw angle from wheel odometry (rad)
+                psi_meas = self.psi_sh.get()  # initial yaw angle from IMU (rad)
+                self.psi_offset = psi_meas - psi # offset between IMU yaw and odometry yaw
 
-                self.state = self.S1_WAIT_FOR_ENABLE # set next state
+                # Get initial time
+                self.t0 = self.start_time.get()
 
-            ### 1: WAITING STATE -----------------------------------------------
-            elif (self.state == self.S1_WAIT_FOR_ENABLE):
-                
-                self.state = self.S2_RUN # set next state
+                self.state = self.S1_ESTIMATING # set next state
             
-            ### 2: RUN STATE ---------------------------------------------------
-            elif (self.state == self.S2_RUN):
+            ### 1: ESTIMATING STATE --------------------------------------------
+            elif (self.state == self.S1_ESTIMATING):
+
+                # Determine input vector, u
+                V_L = self.left_eff_sh.get()
+                V_R = self.right_eff_sh.get()
+                V_L = V_L * self.V_meas / 100.0
+                V_R = V_R * self.V_meas / 100.0
+
+                # Determine values for output state vector, y
+                s_L = self.left_pos_sh.get() * self.RAD_PER_COUNT * self.WHEEL_RADIUS_MM / 1000.0 # Left wheel displacement (m)
+                s_R = self.right_pos_sh.get() * self.RAD_PER_COUNT * self.WHEEL_RADIUS_MM / 1000.0 # Right wheel displacement (m)
+                psi = self.psi_sh.get()  # Yaw angle from IMU (rad)
+                psi -= self.psi_offset  # Subtract offset
+                psi_dot = self.psi_dot_sh.get()  # Yaw rate (rad/s)
                 
-                self.state = self.S2_RUN # remain in this state
-            
+                # Form u_star = [ u, y ] (column vector of inputs and outputs)
+                u_star = np.array([ [V_L],      # Left voltage (V)
+                                    [V_R],      # Right voltage (V)
+                                    [s_L],      # Left position (m)
+                                    [s_R],      # Right position (m)
+                                    [psi],      # Yaw angle (rad)
+                                    [psi_dot]]) # Yaw rate (rad/s)
+                
+                # Predict next state
+                self.x_kplus1 = np.dot(self.A_D, self.x_k) + np.dot(self.B_D, u_star)
+                # Determine present output
+                self.y_k = np.dot(self.C, self.x_k)
+
+                # Put observer values in shares
+                self.obsv_sL_sh.put(float(self.y_k[0,0]))
+                self.obsv_sR_sh.put(float(self.y_k[1,0]))
+
+                self.obsv_left_vel_sh.put(float(self.x_kplus1[0,0]))
+                self.obsv_right_vel_sh.put(float(self.x_kplus1[1,0]))
+                self.obsv_s_sh.put(float(self.x_kplus1[2,0]))
+                self.obsv_yaw_sh.put(float(self.x_kplus1[3,0]))
+                
+                # Put time log for the observer data in a share
+                t = millis() - self.t0
+                self.obsv_time_sh.put(int(t))
+
+                # Update state for next iteration
+                self.x_k = self.x_kplus1
+                
             yield self.state

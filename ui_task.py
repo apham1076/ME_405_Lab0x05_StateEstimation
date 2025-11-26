@@ -13,8 +13,6 @@
 # Users can adjust the effort between runs.
 # ==============================================================================
 
-# from pyb import USB_VCP
-# from pyb import UART
 from time import ticks_ms, ticks_diff
 
 class UITask:
@@ -188,11 +186,12 @@ class UITask:
                         sp_str = value_str[0:4]
                         kp_str = value_str[4:8]
                         ki_str = value_str[8:12]
-                        setpoint = int(sp_str)
-                        kp_int = int(kp_str)
-                        ki_int = int(ki_str)
-                        kp = kp_int / 100.0
-                        ki = ki_int / 100.0
+                        sp_scaled = int(sp_str)
+                        kp_scaled = int(kp_str)
+                        ki_scaled = int(ki_str)
+                        setpoint = sp_scaled / 100.0  # convert back to float
+                        kp = kp_scaled / 100.0 # convert back to float
+                        ki = ki_scaled / 100.0 # convert back to float
                         self.setpoint.put(setpoint)
                         self.kp.put(kp)
                         self.ki.put(ki)

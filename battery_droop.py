@@ -15,7 +15,7 @@ class Battery:
     R_1_OHM = 9.98e3   # 10k ohm (measured 9.98k ohm)
     R_2_OHM = 4.712e3  # 4.7k ohm (measured 4.712k ohm)
     V_REF = 3.3        # ADC reference voltage
-    V_NOM_SINGLE = 1.3         # Nominal battery voltage for a single cell
+    V_NOM_SINGLE = 1.4         # Nominal battery voltage for a single cell
     V_NOM_TOTAL = 6*V_NOM_SINGLE  # Total nominal battery voltage
     LOW_BATT_THRESHOLD = 6.0  # Voltage threshold for "replace batteries"
     #---------------------------------------------------------------------------
