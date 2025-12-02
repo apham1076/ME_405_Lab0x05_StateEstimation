@@ -51,6 +51,7 @@ from ui_task import UITask
 from stream_task import StreamTask
 from steering_task import SteeringTask
 from IMU_task import IMUTask
+from state_estimation_task import StateEstimationTask
 from IMU_sensor import IMU
 from os import listdir
 
@@ -180,6 +181,8 @@ def main():
     mtr_enable = task_share.Share('B', name='Motor Enable Flag')
     stream_data = task_share.Share('B', name='Stream Data Flag')
     abort = task_share.Share('B', name='Abort Flag')
+    first_psi_flag = task_share.Share('B', name='First Psi Flag')
+    read_IMU_flag = task_share.Share('B', name='Read IMU Flag')
 
     # --- Data Queues...
     time_q = task_share.Queue('H', size=MAX_SAMPLES, name='Time queue')
@@ -224,6 +227,14 @@ def main():
                                  control_mode, ir_cmd,
                                  left_sp_sh, right_sp_sh,
                                  k_line, lf_target)
+    
+    state_estimation_task_obj = StateEstimationTask(start_time, obsv_time_sh, left_pos_sh, right_pos_sh, 
+                 left_vel_sh, right_vel_sh,
+                 psi_sh, psi_dot_sh, first_psi_flag, read_IMU_flag,
+                 left_eff_sh, right_eff_sh,
+                 battery,
+                 obsv_sL_sh, obsv_sR_sh, obsv_psi_sh, obsv_psi_dot_sh,
+                 obsv_left_vel_sh, obsv_right_vel_sh, obsv_s_sh, obsv_yaw_sh)
 
     imu_task_obj = IMUTask(imu, psi_sh, psi_dot_sh)
 
@@ -255,6 +266,7 @@ def main():
     cotask.task_list.append(_stream_task)
     cotask.task_list.append(_steering_task)
     cotask.task_list.append(_imu_task)
+    cotask.task_list.append
 
     ### The scheduler is ready to start ###
 

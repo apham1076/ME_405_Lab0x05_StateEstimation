@@ -52,6 +52,7 @@ class IMU:
             "ndof_fmc_off": {"code": 0x0B, "name": "NDOF (Fast Mag Calibration Off)"},
             "ndof":         {"code": 0x0C, "name": "NDOF (Full 9-DOF Fusion)"}
         }
+
         # Enable interrupts for data ready
         msk = 0b00000001
         buf = memoryview(self._buf)[:1]         # buf is type bytes of length 1
@@ -72,6 +73,8 @@ class IMU:
         self._i2c.mem_write(bytes([0x04]), self._DEV_ADDR, self.reg.AXIS_MAP_SIGN[0], timeout=100)
         
         delay(700)  # Delay for IMU to start up
+
+        self.set_operation_mode("config") # start the IMU in config mode
 
     # --------------------------------------------------------------------------
     def _read_reg(self, reg):

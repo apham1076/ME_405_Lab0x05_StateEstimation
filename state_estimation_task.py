@@ -32,14 +32,14 @@ class StateEstimationTask:
     # --------------------------------------------------------------------------
     def __init__(self, start_time, obsv_time_sh, left_pos_sh, right_pos_sh, 
                  left_vel_sh, right_vel_sh,
-                 psi_sh, psi_dot_sh, left_eff_sh, right_eff_sh,
+                 psi_sh, psi_dot_sh, first_psi_flag, read_IMU_flag,
+                 left_eff_sh, right_eff_sh,
                  battery,
                  obsv_sL_sh, obsv_sR_sh, obsv_psi_sh, obsv_psi_dot_sh,
                  obsv_left_vel_sh, obsv_right_vel_sh, obsv_s_sh, obsv_yaw_sh):
 
         # Shares (inputs from other tasks)
         self.start_time = start_time
-        self.obsv_time_sh = obsv_time_sh
         self.left_pos_sh = left_pos_sh
         self.right_pos_sh = right_pos_sh
         self.left_vel_sh = left_vel_sh
@@ -50,6 +50,7 @@ class StateEstimationTask:
         self.right_eff_sh = right_eff_sh
 
         # Shares (outputs to other tasks)
+        self.obsv_time_sh = obsv_time_sh
         self.obsv_sL_sh = obsv_sL_sh
         self.obsv_sR_sh = obsv_sR_sh
         self.obsv_psi_sh = obsv_psi_sh
@@ -58,6 +59,10 @@ class StateEstimationTask:
         self.obsv_right_vel_sh = obsv_right_vel_sh
         self.obsv_s_sh = obsv_s_sh
         self.obsv_yaw_sh = obsv_yaw_sh
+
+        # Flags
+        self.first_psi_flag = first_psi_flag
+        self.read_IMU_flag = read_IMU_flag
 
         # Hardware
         self.battery = battery
@@ -112,13 +117,15 @@ class StateEstimationTask:
                 s_L = self.left_pos_sh.get() * self.RAD_PER_COUNT * self.WHEEL_RADIUS_MM / 1000.0 # initial left wheel displacement (m)
                 s_R = self.right_pos_sh.get() * self.RAD_PER_COUNT * self.WHEEL_RADIUS_MM / 1000.0  # initial right wheel displacement (m)
                 psi = (s_R - s_L) / self.w  # initial yaw angle from wheel odometry (rad)
-                psi_meas = self.psi_sh.get()  # initial yaw angle from IMU (rad)
-                self.psi_offset = psi_meas - psi # offset between IMU yaw and odometry yaw
+                if first_psi_flag:
+                    psi_meas = self.psi_sh.get()  # initial yaw angle from IMU measurement (rad)
+                    self.psi_offset = psi_meas - psi # offset between IMU yaw and odometry yaw
 
-                # Get initial time
-                self.t0 = self.start_time.get()
+                    # Get initial time
+                    self.t0 = self.start_time.get()
 
-                self.state = self.S1_ESTIMATING # set next state
+                    self.state = self.S1_ESTIMATING # set next state
+                yield self.state
             
             ### 1: ESTIMATING STATE --------------------------------------------
             elif (self.state == self.S1_ESTIMATING):
